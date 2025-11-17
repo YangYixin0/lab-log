@@ -16,11 +16,12 @@
 - **帧缓冲区**：使用PSRAM存储
 - **JPEG质量**：12（1-63，越小质量越高）
 - **帧率**：不控制，尽可能快发送
+- **图像翻转**：已启用垂直翻转（上下翻转），修正摄像头安装方向导致的图像颠倒问题
 
 ## LED状态指示
 
-- **WiFi连接中**：闪烁（500ms间隔）
-- **WebSocket连接中**：闪烁（500ms间隔）
+- **WiFi连接中**：闪烁（200ms间隔）
+- **WebSocket连接中**：闪烁（200ms间隔）
 - **连接成功且采集中**：常亮
 - **连接成功但未采集**：每3秒亮300ms
 - **连接失败/断开（ERROR）**：每6秒亮300ms
@@ -63,6 +64,43 @@ Arduino会通过WebSocket发送确认消息，并在串口监视器中显示状�
 - 接收到的控制命令
 - 采集状态变化
 - 发送帧的状态（可选）
+
+## 代码结构
+
+代码使用C++命名空间组织，提高可读性和可维护性，同时保持过程式编程的性能优势：
+
+### `Camera` 命名空间
+- `init()` - 初始化摄像头（包含图像垂直翻转设置）
+- `sendFrame()` - 发送摄像头帧到WebSocket
+- `isCapturing` - 采集状态变量
+
+### `WiFiManager` 命名空间
+- `connect()` - 连接WPA2 Enterprise WiFi
+- `isConnected()` - 检查WiFi连接状态
+- `reconnect()` - 重连WiFi
+
+### `WebSocketManager` 命名空间
+- `connect()` - 连接WebSocket服务器
+- `eventHandler()` - 处理WebSocket事件（连接、断开、命令等）
+- `isConnected()` - 检查WebSocket连接状态
+- `loop()` - 处理WebSocket事件循环
+- `reconnect()` - 重连WebSocket
+- `webSocket` - WebSocket客户端实例
+
+### `StatusLED` 命名空间
+- `init()` - 初始化LED引脚
+- `update()` - 根据连接状态更新LED显示
+- 相关状态变量（`PIN`, `lastUpdate`, `lastErrorCycle`）
+
+### 全局变量
+- `ConnectionState` 枚举类 - 连接状态枚举，用于表示设备所处的连接状态（如未连接、WiFi已连接、WebSocket已连接、正在采集等），用于判断和切换设备各个网络阶段。
+- `currentState` - 当前连接状态，是`ConnectionState`枚举类的变量。
+
+### 命名空间优势
+- **代码组织**：相关功能逻辑分组，提高可读性
+- **无性能开销**：命名空间不增加内存或执行时间
+- **避免命名冲突**：不同模块的变量和函数不会冲突
+- **易于维护**：功能模块化，便于修改和扩展
 
 ## 文件说明
 
