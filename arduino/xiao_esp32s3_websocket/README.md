@@ -36,7 +36,7 @@
 2. 配置WiFi凭证和WebSocket服务器：
    - 编辑 `secrets.h` 文件
    - 将 `EAP_IDENTITY` 和 `EAP_PASSWORD` 替换为实际的WiFi凭证
-   - 配置 `WEBSOCKET_SERVER` 和 `WEBSOCKET_PORT`（服务器地址和端口）
+   - 配置 `WEBSOCKET_SERVER` 和 `WEBSOCKET_PORT`（服务器地址和端口，路径固定为 `/esp`）
 
 3. 上传程序到开发板：
    - 在Arduino IDE中打开 `xiao_esp32s3_websocket.ino`

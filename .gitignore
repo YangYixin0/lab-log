@@ -17,6 +17,7 @@ logs/
 temp/
 tmp/
 *.tmp
+images/
 
 # 依赖目录
 node_modules/

@@ -27,7 +27,8 @@ fps_counter = 0
 frame_sequence = 0  # 全局帧序号计数器
 
 # 客户端连接管理
-connected_websocket = None  # 当前连接的WebSocket客户端
+arduino_websocket = None  # Arduino客户端连接（/esp）
+frontend_websocket = None  # 前端开发者控制台连接（/dev）
 
 def ensure_images_dir():
     """确保图片目录存在"""
@@ -69,18 +70,35 @@ def save_frame(image_data, frame_number):
             f.write(image_data)
         return True
     except Exception as e:
-        print(f"保存图片失败: {e}")
+        ts = datetime.now().strftime('%H:%M:%S')
+        print(f"[{ts}] [服务器] 保存图片失败: {e}")
         return False
 
-async def handle_client(websocket):
-    """处理客户端连接"""
-    global frame_count, last_fps_time, fps_counter, frame_sequence, connected_websocket
+async def send_log_to_frontend(message: str):
+    """向前端发送日志消息"""
+    global frontend_websocket
+    if frontend_websocket is not None:
+        try:
+            await frontend_websocket.send(message)
+        except (websockets.exceptions.ConnectionClosed, Exception):
+            # 如果发送失败（连接已关闭或其他错误），则认为前端连接已失效
+            frontend_websocket = None
+
+async def handle_arduino(websocket):
+    """处理Arduino客户端连接（/esp）"""
+    global frame_count, last_fps_time, fps_counter, frame_sequence, arduino_websocket
     
     client_address = websocket.remote_address
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 新客户端连接: {client_address[0]}:{client_address[1]}")
+    ts = datetime.now().strftime('%H:%M:%S')
+    log_msg = f"[{ts}] [Arduino] 新连接: {client_address[0]}:{client_address[1]}"
+    print(log_msg)
+    try:
+        await send_log_to_frontend(log_msg)
+    except Exception:
+        pass  # 日志发送失败不影响主流程
     
-    # 保存当前连接的WebSocket
-    connected_websocket = websocket
+    # 保存Arduino连接
+    arduino_websocket = websocket
     
     # 确保图片目录存在
     ensure_images_dir()
@@ -91,11 +109,13 @@ async def handle_client(websocket):
     frame_sequence = 0
     last_fps_time = datetime.now()
     
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 可以使用以下命令控制采集:")
-    print("  start  - 开始采集")
-    print("  stop   - 停止采集")
-    print("  status - 查询状态")
-    print("  help   - 显示帮助")
+    ts = datetime.now().strftime('%H:%M:%S')
+    help_msg = f"[{ts}] [服务器] 可以使用以下命令控制采集:\n  start  - 开始采集\n  stop   - 停止采集\n  status - 查询状态\n  help   - 显示帮助"
+    print(help_msg)
+    try:
+        await send_log_to_frontend(help_msg)
+    except Exception:
+        pass  # 日志发送失败不影响主流程
     
     try:
         async for message in websocket:
@@ -119,28 +139,123 @@ async def handle_client(websocket):
                 
                 if time_diff >= 1.0:  # 每秒更新一次
                     fps = fps_counter / time_diff
-                    timestamp = current_time.strftime('%Y-%m-%d %H:%M:%S')
-                    print(f"[{timestamp}] FPS: {fps:.2f} (总帧数: {frame_count})")
+                    timestamp = current_time.strftime('%H:%M:%S')
+                    log_msg = f"[{timestamp}] [Arduino] FPS: {fps:.2f} (总帧数: {frame_count})"
+                    print(log_msg)
+                    try:
+                        await send_log_to_frontend(log_msg)
+                    except Exception:
+                        pass  # 日志发送失败不影响主流程
                     
                     # 重置计数器
                     fps_counter = 0
                     last_fps_time = current_time
             else:
-                # 收到文本消息（Arduino的确认或状态消息）
+                # 收到文本消息（ACK/STATUS）
                 message_str = message.decode('utf-8') if isinstance(message, bytes) else message
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Arduino响应: {message_str}")
+                ts = datetime.now().strftime('%H:%M:%S')
+                log_msg = f"[{ts}] [Arduino] {message_str}"
+                print(log_msg)
+                try:
+                    await send_log_to_frontend(log_msg)
+                except Exception:
+                    pass  # 日志发送失败不影响主流程
                 
     except websockets.exceptions.ConnectionClosed:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 客户端 {client_address[0]}:{client_address[1]} 断开连接")
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 总共接收 {frame_count} 帧")
-        connected_websocket = None
+        ts = datetime.now().strftime('%H:%M:%S')
+        log_msg1 = f"[{ts}] [Arduino] 断开连接: {client_address[0]}:{client_address[1]}"
+        log_msg2 = f"[{ts}] [Arduino] 总共接收 {frame_count} 帧"
+        print(log_msg1)
+        print(log_msg2)
+        try:
+            await send_log_to_frontend(log_msg1)
+            await send_log_to_frontend(log_msg2)
+        except Exception:
+            pass  # 日志发送失败不影响主流程
+        arduino_websocket = None
     except Exception as e:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 处理客户端 {client_address[0]}:{client_address[1]} 时发生错误: {e}")
-        connected_websocket = None
+        ts = datetime.now().strftime('%H:%M:%S')
+        log_msg = f"[{ts}] [Arduino] 处理连接时发生错误: {e}"
+        print(log_msg)
+        try:
+            await send_log_to_frontend(log_msg)
+        except Exception:
+            pass  # 日志发送失败不影响主流程
+        arduino_websocket = None
+
+async def handle_frontend(websocket):
+    """处理前端开发者控制台连接（/dev）"""
+    global frontend_websocket, arduino_websocket
+    
+    client_address = websocket.remote_address
+    ts = datetime.now().strftime('%H:%M:%S')
+    print(f"[{ts}] [前端] 新连接: {client_address[0]}:{client_address[1]}")
+    
+    # 保存前端连接
+    frontend_websocket = websocket
+    
+    try:
+        async for message in websocket:
+            # 前端发送文本消息（命令）
+            if isinstance(message, bytes):
+                message_str = message.decode('utf-8')
+            else:
+                message_str = message
+            
+            ts = datetime.now().strftime('%H:%M:%S')
+            print(f"[{ts}] [服务器] 收到命令: {message_str}")
+            
+            # 转发命令给Arduino
+            if arduino_websocket is None:
+                error_msg = f"[{ts}] [服务器] 错误: Arduino未连接，无法转发命令"
+                print(error_msg)
+                try:
+                    await send_log_to_frontend(error_msg)
+                except Exception:
+                    pass  # 日志发送失败不影响主流程
+            else:
+                try:
+                    await arduino_websocket.send(message_str)
+                    success_msg = f"[{ts}] [服务器] 已转发命令给Arduino: {message_str}"
+                    print(success_msg)
+                    try:
+                        await send_log_to_frontend(success_msg)
+                    except Exception:
+                        pass  # 日志发送失败不影响主流程
+                except (websockets.exceptions.ConnectionClosed, Exception) as e:
+                    error_msg = f"[{ts}] [服务器] 转发命令失败: {e}"
+                    print(error_msg)
+                    try:
+                        await send_log_to_frontend(error_msg)
+                    except Exception:
+                        pass  # 日志发送失败不影响主流程
+                    arduino_websocket = None
+                
+    except websockets.exceptions.ConnectionClosed:
+        ts = datetime.now().strftime('%H:%M:%S')
+        print(f"[{ts}] [前端] 断开连接: {client_address[0]}:{client_address[1]}")
+        frontend_websocket = None
+    except Exception as e:
+        ts = datetime.now().strftime('%H:%M:%S')
+        print(f"[{ts}] [前端] 处理连接时发生错误: {e}")
+        frontend_websocket = None
+
+async def handle_client(websocket):
+    """根据路径路由到不同的处理函数"""
+    # 在 websockets 15.0+ 中，路径通过 request.path 获取
+    path = websocket.request.path
+    if path == "/esp":
+        await handle_arduino(websocket)
+    elif path == "/dev":
+        await handle_frontend(websocket)
+    else:
+        ts = datetime.now().strftime('%H:%M:%S')
+        print(f"[{ts}] [服务器] 拒绝未知路径的连接: {path}")
+        await websocket.close(code=1008, reason="Unknown endpoint")
 
 async def read_commands():
     """读取命令行输入并发送控制命令"""
-    global connected_websocket
+    global arduino_websocket
     
     loop = asyncio.get_event_loop()
     
@@ -163,36 +278,44 @@ async def read_commands():
                 continue
             
             if command == "quit" or command == "exit":
-                print("正在退出...")
+                ts = datetime.now().strftime('%H:%M:%S')
+                print(f"[{ts}] [服务器] 正在退出...")
                 os._exit(0)
             
-            if connected_websocket is None:
-                print("错误: 没有客户端连接，无法发送命令")
+            if arduino_websocket is None:
+                ts = datetime.now().strftime('%H:%M:%S')
+                print(f"[{ts}] [终端] 错误: Arduino未连接，无法发送命令")
                 continue
             
             # 发送命令到Arduino
             try:
-                await connected_websocket.send(command)
-                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print(f"[{timestamp}] 已发送命令: {command}")
+                await arduino_websocket.send(command)
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                print(f"[{timestamp}] [终端] 已发送命令: {command}")
             except Exception as e:
-                print(f"发送命令失败: {e}")
-                connected_websocket = None
+                ts = datetime.now().strftime('%H:%M:%S')
+                print(f"[{ts}] [终端] 发送命令失败: {e}")
+                arduino_websocket = None
                 
         except EOFError:
             # 输入流关闭
             break
         except Exception as e:
-            print(f"读取命令时出错: {e}")
+            ts = datetime.now().strftime('%H:%M:%S')
+            print(f"[{ts}] [终端] 读取命令时出错: {e}")
             await asyncio.sleep(0.1)
 
 async def main():
     """启动WebSocket服务器"""
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 启动WebSocket服务器...")
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 监听地址: {HOST}:{PORT}")
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 图片保存路径: {IMAGES_DIR}")
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 最多保存图片数: {MAX_IMAGES}")
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 等待客户端连接...")
+    ts = datetime.now().strftime('%H:%M:%S')
+    print(f"[{ts}] [服务器] 启动WebSocket服务器...")
+    print(f"[{ts}] [服务器] 监听地址: {HOST}:{PORT}")
+    print(f"[{ts}] [服务器] 图片保存路径: {IMAGES_DIR}")
+    print(f"[{ts}] [服务器] 最多保存图片数: {MAX_IMAGES}")
+    print(f"[{ts}] [服务器] 支持的endpoint:")
+    print(f"[{ts}] [服务器]   /esp - Arduino摄像头客户端")
+    print(f"[{ts}] [服务器]   /dev - 开发者前端控制台")
+    print(f"[{ts}] [服务器] 等待客户端连接...")
     print("-" * 60)
     
     # 启动命令行输入任务
@@ -205,4 +328,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 服务器已停止")
+        ts = datetime.now().strftime('%H:%M:%S')
+        print(f"\n[{ts}] [服务器] 服务器已停止")

@@ -20,7 +20,7 @@ const char *ssid = "eduroam";   // 网络SSID号
 // WebSocket配置（从secrets.h读取）
 const char *websocket_server = WEBSOCKET_SERVER;
 const int websocket_port = WEBSOCKET_PORT;
-const char *websocket_path = "/";
+const char *websocket_path = "/esp";
 
 // 摄像头配置
 #define CAMERA_MODEL_XIAO_ESP32S3 // Has PSRAM

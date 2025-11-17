@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Developer WebSocket Console (/dev)</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e5e7eb;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    header {
+      padding: 12px 20px;
+      background: #020617;
+      border-bottom: 1px solid #1f2937;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    main {
+      flex: 1;
+      padding: 16px 20px 20px;
+      display: grid;
+      grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+      grid-gap: 16px;
+    }
+    .panel {
+      background: #020617;
+      border-radius: 8px;
+      border: 1px solid #1f2937;
+      padding: 12px 14px;
+      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.7);
+    }
+    .panel h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #e5e7eb;
+    }
+    label {
+      font-size: 12px;
+      color: #9ca3af;
+      display: block;
+      margin-bottom: 4px;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid #374151;
+      background: #020617;
+      color: #e5e7eb;
+      font-size: 12px;
+      box-sizing: border-box;
+    }
+    input[type="text"]:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.5);
+    }
+    .field-row {
+      margin-bottom: 8px;
+    }
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    button {
+      border: none;
+      border-radius: 999px;
+      padding: 5px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #111827;
+      color: #e5e7eb;
+      border: 1px solid #374151;
+      transition: background 0.15s ease, transform 0.05s ease, border-color 0.15s;
+    }
+    button.primary {
+      background: #2563eb;
+      border-color: #3b82f6;
+    }
+    button.danger {
+      background: #b91c1c;
+      border-color: #ef4444;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    button:hover:not(:disabled) {
+      transform: translateY(-0.5px);
+      filter: brightness(1.05);
+    }
+    #status {
+      font-size: 12px;
+      margin-top: 4px;
+      color: #9ca3af;
+    }
+    #status span {
+      font-weight: 500;
+    }
+    #status span.ok {
+      color: #4ade80;
+    }
+    #status span.err {
+      color: #f97316;
+    }
+    #log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      background: #020617;
+      border-radius: 4px;
+      border: 1px solid #1f2937;
+      padding: 6px 8px;
+      height: calc(100vh - 170px);
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .log-line {
+      margin: 0;
+    }
+    .log-line.in {
+      color: #a5b4fc;
+    }
+    .log-line.out {
+      color: #6ee7b7;
+    }
+    .log-line.sys {
+      color: #9ca3af;
+    }
+    footer {
+      padding: 6px 20px 10px;
+      font-size: 11px;
+      color: #6b7280;
+      border-top: 1px solid #1f2937;
+      background: #020617;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Developer WebSocket Console <span style="color:#6b7280;">(/dev)</span></h1>
+    <div id="status">状态: <span class="err">未连接</span></div>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>连接配置</h2>
+      <div class="field-row">
+        <label for="ws-url">WebSocket URL</label>
+        <input id="ws-url" type="text" />
+      </div>
+      <div class="btn-row">
+        <button id="btn-connect" class="primary">连接</button>
+        <button id="btn-disconnect">断开</button>
+      </div>
+
+      <h2 style="margin-top:12px;">命令控制</h2>
+      <p style="font-size:11px;color:#9ca3af;margin:0 0 6px;">向后端 <code>/dev</code> 连接发送命令，配合 Arduino 摄像头客户端使用。</p>
+      <div class="btn-row">
+        <button id="btn-start">start</button>
+        <button id="btn-stop">stop</button>
+        <button id="btn-status">status</button>
+      </div>
+      <div class="field-row" style="margin-top:10px;">
+        <label for="custom-cmd">自定义命令</label>
+        <input id="custom-cmd" type="text" placeholder="例如：status 或 任意调试字符串" />
+      </div>
+      <div class="btn-row">
+        <button id="btn-send-custom">发送自定义命令</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>日志</h2>
+      <div id="log"></div>
+    </section>
+  </main>
+  <footer>
+    提示：默认 URL 为 <code>ws://pqzc1405495.bohrium.tech:50001/dev</code>，如需连接其它服务器可手动修改。
+  </footer>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const urlInput = document.getElementById('ws-url');
+    const btnConnect = document.getElementById('btn-connect');
+    const btnDisconnect = document.getElementById('btn-disconnect');
+    const btnStart = document.getElementById('btn-start');
+    const btnStop = document.getElementById('btn-stop');
+    const btnStatus = document.getElementById('btn-status');
+    const customCmdInput = document.getElementById('custom-cmd');
+    const btnSendCustom = document.getElementById('btn-send-custom');
+
+    let ws = null;
+
+    function defaultWsUrl() {
+      // 后端固定部署在 pqzc1405495.bohrium.tech:50001/dev
+      return 'ws://pqzc1405495.bohrium.tech:50001/dev';
+    }
+
+    function setStatus(text, ok) {
+      const span = statusEl.querySelector('span') || document.createElement('span');
+      span.textContent = text;
+      span.className = ok ? 'ok' : 'err';
+      statusEl.innerHTML = '状态: ';
+      statusEl.appendChild(span);
+    }
+
+    function appendLog(type, text) {
+      const p = document.createElement('div');
+      p.className = `log-line ${type}`;
+      const now = new Date().toLocaleTimeString();
+      p.textContent = `[${now}] ${text}`;
+      logEl.appendChild(p);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function updateButtons() {
+      const connected = ws && ws.readyState === WebSocket.OPEN;
+      btnConnect.disabled = connected;
+      btnDisconnect.disabled = !connected;
+      btnStart.disabled = !connected;
+      btnStop.disabled = !connected;
+      btnStatus.disabled = !connected;
+      btnSendCustom.disabled = !connected;
+    }
+
+    function connect() {
+      const url = urlInput.value.trim() || defaultWsUrl();
+      urlInput.value = url;
+
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        appendLog('sys', '已有连接正在使用，不重复连接。');
+        return;
+      }
+
+      appendLog('sys', `尝试连接到 ${url} ...`);
+      setStatus('连接中...', false);
+
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        appendLog('sys', 'WebSocket 已连接。');
+        setStatus('已连接', true);
+        updateButtons();
+      };
+
+      ws.onclose = (event) => {
+        appendLog('sys', `WebSocket 连接已关闭 (code=${event.code}, reason=${event.reason || '无'})`);
+        setStatus('未连接', false);
+        updateButtons();
+      };
+
+      ws.onerror = (err) => {
+        appendLog('sys', 'WebSocket 发生错误（详情见控制台）。');
+        console.error('WebSocket error:', err);
+        setStatus('错误', false);
+      };
+
+      ws.onmessage = (event) => {
+        const data = event.data;
+        appendLog('in', `← ${data}`);
+      };
+
+      updateButtons();
+    }
+
+    function disconnect() {
+      if (ws) {
+        appendLog('sys', '手动关闭连接...');
+        ws.close();
+        ws = null;
+        updateButtons();
+      }
+    }
+
+    function sendCommand(cmd) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendLog('sys', '尚未连接，无法发送命令。');
+        return;
+      }
+      cmd = cmd.trim();
+      if (!cmd) return;
+      ws.send(cmd);
+      appendLog('out', `→ ${cmd}`);
+    }
+
+    // 初始化
+    urlInput.value = defaultWsUrl();
+    updateButtons();
+
+    btnConnect.addEventListener('click', connect);
+    btnDisconnect.addEventListener('click', disconnect);
+    btnStart.addEventListener('click', () => sendCommand('start'));
+    btnStop.addEventListener('click', () => sendCommand('stop'));
+    btnStatus.addEventListener('click', () => sendCommand('status'));
+    btnSendCustom.addEventListener('click', () => sendCommand(customCmdInput.value));
+
+    customCmdInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        sendCommand(customCmdInput.value);
+      }
+    });
+  </script>
+</body>
+</html>
+
+
