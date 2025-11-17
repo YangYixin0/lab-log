@@ -65,7 +65,7 @@ namespace Camera {
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
     config.xclk_freq_hz = 20000000;
-    config.frame_size = FRAMESIZE_UXGA;      // 1600×1200
+    config.frame_size = FRAMESIZE_HD;      // 1280×720
     config.pixel_format = PIXFORMAT_JPEG;     // JPEG格式用于流传输
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     config.fb_location = CAMERA_FB_IN_PSRAM; // 使用PSRAM存储帧缓冲区
@@ -113,6 +113,97 @@ namespace Camera {
       // 释放帧缓冲区
       esp_camera_fb_return(fb);
     }
+  }
+  
+  bool setResolution(String resolution) {
+    sensor_t *s = esp_camera_sensor_get();
+    if (s == NULL) {
+      Serial.println("无法获取传感器对象");
+      return false;
+    }
+    
+    resolution.toUpperCase();
+    framesize_t framesize = FRAMESIZE_UXGA;  // 默认值
+    String resolutionName = "HD";
+    
+    if (resolution == "QQVGA") {
+      framesize = FRAMESIZE_QQVGA;
+      resolutionName = "QQVGA (160×120)";
+    } else if (resolution == "QCIF") {
+      framesize = FRAMESIZE_QCIF;
+      resolutionName = "QCIF (176×144)";
+    } else if (resolution == "HQVGA") {
+      framesize = FRAMESIZE_HQVGA;
+      resolutionName = "HQVGA (240×176)";
+    } else if (resolution == "240X240") {
+      framesize = FRAMESIZE_240X240;
+      resolutionName = "240X240 (240×240)";
+    } else if (resolution == "QVGA") {
+      framesize = FRAMESIZE_QVGA;
+      resolutionName = "QVGA (320×240)";
+    } else if (resolution == "CIF") {
+      framesize = FRAMESIZE_CIF;
+      resolutionName = "CIF (400×296)";
+    } else if (resolution == "HVGA") {
+      framesize = FRAMESIZE_HVGA;
+      resolutionName = "HVGA (480×320)";
+    } else if (resolution == "VGA") {
+      framesize = FRAMESIZE_VGA;
+      resolutionName = "VGA (640×480)";
+    } else if (resolution == "SVGA") {
+      framesize = FRAMESIZE_SVGA;
+      resolutionName = "SVGA (800×600)";
+    } else if (resolution == "XGA") {
+      framesize = FRAMESIZE_XGA;
+      resolutionName = "XGA (1024×768)";
+    } else if (resolution == "HD") {
+      framesize = FRAMESIZE_HD;
+      resolutionName = "HD (1280×720)";
+    } else if (resolution == "SXGA") {
+      framesize = FRAMESIZE_SXGA;
+      resolutionName = "SXGA (1280×1024)";
+    } else if (resolution == "UXGA") {
+      framesize = FRAMESIZE_UXGA;
+      resolutionName = "UXGA (1600×1200)";
+    } else if (resolution == "FHD") {
+      framesize = FRAMESIZE_FHD;
+      resolutionName = "FHD (1920×1080)";
+    } else if (resolution == "P_HD") {
+      framesize = FRAMESIZE_P_HD;
+      resolutionName = "P_HD (720×1280)";
+    } else if (resolution == "P_3MP") {
+      framesize = FRAMESIZE_P_3MP;
+      resolutionName = "P_3MP (864×1536)";
+    } else if (resolution == "QXGA") {
+      framesize = FRAMESIZE_QXGA;
+      resolutionName = "QXGA (2048×1536)";
+    // } else if (resolution == "QSXGA") {
+    //   framesize = FRAMESIZE_QSXGA;
+    //   resolutionName = "QSXGA (2560×1920)";  // OV3660不支持
+    } else {
+      Serial.printf("未知分辨率: %s，使用默认值 UXGA\n", resolution.c_str());
+    }
+    
+    s->set_framesize(s, framesize);
+    Serial.printf("分辨率已设置为: %s\n", resolutionName.c_str());
+    return true;
+  }
+  
+  bool setQuality(int quality) {
+    if (quality < 1 || quality > 63) {
+      Serial.printf("JPEG质量超出范围 (1-63): %d，使用默认值 12\n", quality);
+      quality = 12;
+    }
+    
+    sensor_t *s = esp_camera_sensor_get();
+    if (s == NULL) {
+      Serial.println("无法获取传感器对象");
+      return false;
+    }
+    
+    s->set_quality(s, quality);
+    Serial.printf("JPEG质量已设置为: %d (1-63，越小质量越高)\n", quality);
+    return true;
   }
 }
 
@@ -187,7 +278,8 @@ namespace WebSocketManager {
         Serial.println((char*)payload);
         currentState = STATE_CONNECTED;
         Serial.println("等待开始采集命令...");
-        Serial.println("可用命令: start, stop, status");
+        Serial.println("可用命令: start [分辨率] [质量], stop, status");
+        Serial.println("  示例: start, start UXGA, start UXGA 12, start VGA 15");
         Camera::isCapturing = false;  // 连接后默认不采集
         break;
         
@@ -195,23 +287,58 @@ namespace WebSocketManager {
         {
           String command = String((char*)payload);
           command.trim();
-          command.toLowerCase();
+          String commandLower = command;
+          commandLower.toLowerCase();
           
           Serial.print("收到命令: ");
           Serial.println(command);
           
-          if (command == "start") {
-            if (!Camera::isCapturing) {
-              Camera::isCapturing = true;
-              Serial.println(">>> 开始采集和上传摄像头数据");
-              // 发送确认消息
-              webSocket.sendTXT("ACK: 开始采集");
-            } else {
-              Serial.println(">>> 已经在采集中");
-              webSocket.sendTXT("ACK: 已在采集中");
+          if (commandLower.startsWith("start")) {
+            // 如果正在采集，先停止采集
+            if (Camera::isCapturing) {
+              Camera::isCapturing = false;
+              Serial.println(">>> 停止当前采集，准备重新开始");
             }
+            
+            // 解析参数（分辨率和质量）
+            String resolution = "UXGA";  // 默认分辨率
+            int quality = 12;            // 默认质量
+            
+            // 解析参数：start <resolution> <quality>
+            int firstSpace = command.indexOf(' ');
+            if (firstSpace > 0) {
+              int secondSpace = command.indexOf(' ', firstSpace + 1);
+              if (secondSpace > firstSpace) {
+                // 有两个参数：分辨率和质量
+                resolution = command.substring(firstSpace + 1, secondSpace);
+                quality = command.substring(secondSpace + 1).toInt();
+              } else {
+                // 只有一个参数：可能是分辨率或质量
+                String param = command.substring(firstSpace + 1);
+                // 尝试解析为数字（质量）
+                int paramInt = param.toInt();
+                if (paramInt > 0 && paramInt <= 63) {
+                  // 是质量参数
+                  quality = paramInt;
+                } else {
+                  // 是分辨率参数
+                  resolution = param;
+                }
+              }
+            }
+            
+            // 设置摄像头参数
+            Camera::setResolution(resolution);
+            Camera::setQuality(quality);
+            
+            // 开始采集（或重新开始采集）
+            Camera::isCapturing = true;
+            Serial.println(">>> 开始采集和上传摄像头数据");
+            // 发送确认消息，包含使用的参数
+            String ackMsg = "ACK: 开始采集 (分辨率: " + resolution + ", 质量: " + String(quality) + ")";
+            webSocket.sendTXT(ackMsg);
           }
-          else if (command == "stop") {
+          else if (commandLower == "stop") {
             if (Camera::isCapturing) {
               Camera::isCapturing = false;
               Serial.println(">>> 停止采集和上传");
@@ -222,7 +349,7 @@ namespace WebSocketManager {
               webSocket.sendTXT("ACK: 未在采集");
             }
           }
-          else if (command == "status") {
+          else if (commandLower == "status") {
             String status = Camera::isCapturing ? "采集中" : "已停止";
             Serial.printf(">>> 当前状态: %s\n", status.c_str());
             webSocket.sendTXT("STATUS: " + status);

@@ -150,11 +150,55 @@
       max-height: 100%;
       object-fit: contain;
       display: block;
+      cursor: pointer;
+      user-select: none;
+    }
+    #camera-view img:hover {
+      opacity: 0.9;
     }
     #camera-view .placeholder {
       color: #6b7280;
       font-size: 12px;
       text-align: center;
+    }
+    #camera-view .fullscreen-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: rgba(0, 0, 0, 0.6);
+      border: 1px solid #374151;
+      border-radius: 4px;
+      padding: 6px 10px;
+      color: #e5e7eb;
+      font-size: 12px;
+      cursor: pointer;
+      z-index: 10;
+      display: none;
+    }
+    #camera-view:hover .fullscreen-btn {
+      display: block;
+    }
+    #camera-view .fullscreen-btn:hover {
+      background: rgba(0, 0, 0, 0.8);
+      border-color: #3b82f6;
+    }
+    #camera-view:fullscreen {
+      background: #000;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #camera-view:fullscreen img {
+      max-width: 100vw;
+      max-height: 100vh;
+    }
+    #camera-view:fullscreen .fullscreen-btn {
+      display: block;
+      top: 20px;
+      right: 20px;
+      font-size: 14px;
+      padding: 8px 14px;
     }
     .log-line {
       margin: 0;
@@ -196,6 +240,29 @@
 
       <h2 style="margin-top:12px;">命令控制</h2>
       <p style="font-size:11px;color:#9ca3af;margin:0 0 6px;">向后端 <code>/dev</code> 连接发送命令，配合 Arduino 摄像头客户端使用。</p>
+      
+      <div class="field-row">
+        <label for="resolution">分辨率</label>
+        <select id="resolution" style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid #374151;background:#020617;color:#e5e7eb;font-size:12px;box-sizing:border-box;">
+          <option value="FHD">FHD (1920×1080)</option>
+          <option value="HD" selected>HD (1280×720)</option>
+          <option value="QSXGA">QSXGA (2560×1920) - OV3660不支持</option>
+          <option value="QXGA">QXGA (2048×1536)</option>
+          <option value="UXGA">UXGA (1600×1200)</option>
+          <option value="SXGA">SXGA (1280×1024)</option>
+          <option value="XGA">XGA (1024×768)</option>
+          <option value="SVGA">SVGA (800×600)</option>
+          <option value="VGA">VGA (640×480)</option>
+          <option value="P_3MP">P_3MP (864×1536)</option>
+          <option value="P_HD">P_HD (720×1280)</option>
+        </select>
+      </div>
+      
+      <div class="field-row">
+        <label for="quality">JPEG质量 (1-63，越小质量越高)</label>
+        <input id="quality" type="number" min="1" max="63" placeholder="默认: 12" style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid #374151;background:#020617;color:#e5e7eb;font-size:12px;box-sizing:border-box;" />
+      </div>
+      
       <div class="btn-row">
         <button id="btn-start">start</button>
         <button id="btn-stop">stop</button>
@@ -219,6 +286,7 @@
       <h2>摄像头画面</h2>
       <div id="camera-view">
         <div class="placeholder">等待图片数据...</div>
+        <button class="fullscreen-btn" id="fullscreen-btn" title="全屏 (F11或双击图片)">全屏</button>
       </div>
     </section>
   </main>
@@ -235,8 +303,12 @@
     const btnStart = document.getElementById('btn-start');
     const btnStop = document.getElementById('btn-stop');
     const btnStatus = document.getElementById('btn-status');
+    const resolutionSelect = document.getElementById('resolution');
+    const qualityInput = document.getElementById('quality');
     const customCmdInput = document.getElementById('custom-cmd');
     const btnSendCustom = document.getElementById('btn-send-custom');
+    const cameraView = document.getElementById('camera-view');
+    const fullscreenBtn = document.getElementById('fullscreen-btn');
 
     let ws = null;
 
@@ -314,22 +386,56 @@
           const reader = new FileReader();
           
           reader.onload = (e) => {
-            const img = document.createElement('img');
-            img.src = e.target.result;
-            
-            const cameraView = document.getElementById('camera-view');
             // 清除占位符
             const placeholder = cameraView.querySelector('.placeholder');
             if (placeholder) {
               placeholder.remove();
             }
-            // 清除旧图片
-            const oldImg = cameraView.querySelector('img');
-            if (oldImg) {
-              oldImg.remove();
+            
+            // 创建新图片元素
+            const newImg = document.createElement('img');
+            newImg.style.display = 'none'; // 先隐藏，等待加载完成
+            
+            // 添加双击进入全屏功能
+            newImg.addEventListener('dblclick', toggleFullscreen);
+            
+            // 等待新图片加载完成后再显示
+            const showNewImage = () => {
+              // 获取当前显示的图片
+              const oldImg = cameraView.querySelector('img');
+              
+              // 将新图片添加到DOM（如果还没有）
+              if (!newImg.parentNode) {
+                cameraView.appendChild(newImg);
+              }
+              
+              // 显示新图片
+              newImg.style.display = 'block';
+              
+              // 立即移除旧图片（双缓冲机制确保无缝切换）
+              if (oldImg && oldImg !== newImg) {
+                oldImg.remove();
+              }
+            };
+            
+            // 图片加载完成事件
+            newImg.onload = showNewImage;
+            
+            // 图片加载错误事件
+            newImg.onerror = () => {
+              appendLog('sys', '图片加载失败');
+              if (newImg.parentNode) {
+                newImg.remove();
+              }
+            };
+            
+            // 设置图片源（这会触发onload）
+            newImg.src = e.target.result;
+            
+            // 如果图片已经加载完成（缓存），立即显示
+            if (newImg.complete && newImg.naturalWidth > 0) {
+              showNewImage();
             }
-            // 添加新图片
-            cameraView.appendChild(img);
           };
           
           reader.onerror = () => {
@@ -366,13 +472,86 @@
       appendLog('out', `→ ${cmd}`);
     }
 
+    // 全屏功能
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        // 进入全屏
+        if (cameraView.requestFullscreen) {
+          cameraView.requestFullscreen();
+        } else if (cameraView.webkitRequestFullscreen) {
+          cameraView.webkitRequestFullscreen();
+        } else if (cameraView.msRequestFullscreen) {
+          cameraView.msRequestFullscreen();
+        }
+      } else {
+        // 退出全屏
+        if (document.exitFullscreen) {
+          document.exitFullscreen();
+        } else if (document.webkitExitFullscreen) {
+          document.webkitExitFullscreen();
+        } else if (document.msExitFullscreen) {
+          document.msExitFullscreen();
+        }
+      }
+    }
+
+    function updateFullscreenButton() {
+      if (document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement) {
+        fullscreenBtn.textContent = '退出全屏';
+      } else {
+        fullscreenBtn.textContent = '全屏';
+      }
+    }
+
+    // 监听全屏状态变化
+    document.addEventListener('fullscreenchange', updateFullscreenButton);
+    document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
+    document.addEventListener('msfullscreenchange', updateFullscreenButton);
+
+    // 全屏按钮点击事件
+    fullscreenBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleFullscreen();
+    });
+
+    // 键盘快捷键：F11进入/退出全屏，ESC退出全屏
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'F11') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.key === 'Escape' && (document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement)) {
+        toggleFullscreen();
+      }
+    });
+
     // 初始化
     urlInput.value = defaultWsUrl();
     updateButtons();
 
     btnConnect.addEventListener('click', connect);
     btnDisconnect.addEventListener('click', disconnect);
-    btnStart.addEventListener('click', () => sendCommand('start'));
+    btnStart.addEventListener('click', () => {
+      // 读取分辨率和质量参数
+      const resolution = resolutionSelect.value.trim();
+      const quality = qualityInput.value.trim();
+      
+      // 构造命令
+      let cmd = 'start';
+      if (resolution || quality) {
+        const parts = [];
+        if (resolution) {
+          parts.push(resolution);
+        }
+        if (quality) {
+          parts.push(quality);
+        }
+        if (parts.length > 0) {
+          cmd = 'start ' + parts.join(' ');
+        }
+      }
+      
+      sendCommand(cmd);
+    });
     btnStop.addEventListener('click', () => sendCommand('stop'));
     btnStatus.addEventListener('click', () => sendCommand('status'));
     btnSendCustom.addEventListener('click', () => sendCommand(customCmdInput.value));
