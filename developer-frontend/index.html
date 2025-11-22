@@ -287,7 +287,7 @@
       <div id="camera-view">
         <div class="placeholder">等待图片数据...</div>
         <button class="fullscreen-btn" id="fullscreen-btn" title="全屏 (F11或双击图片)">全屏</button>
-      </div>
+  </div>
     </section>
   </main>
   <footer>
@@ -390,8 +390,8 @@
             const placeholder = cameraView.querySelector('.placeholder');
             if (placeholder) {
               placeholder.remove();
-            }
-            
+    }
+
             // 创建新图片元素
             const newImg = document.createElement('img');
             newImg.style.display = 'none'; // 先隐藏，等待加载完成
@@ -483,7 +483,7 @@
         } else if (cameraView.msRequestFullscreen) {
           cameraView.msRequestFullscreen();
         }
-      } else {
+          } else {
         // 退出全屏
         if (document.exitFullscreen) {
           document.exitFullscreen();
@@ -500,7 +500,7 @@
         fullscreenBtn.textContent = '退出全屏';
       } else {
         fullscreenBtn.textContent = '全屏';
-      }
+          }
     }
 
     // 监听全屏状态变化

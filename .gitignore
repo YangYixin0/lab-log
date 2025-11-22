@@ -18,6 +18,7 @@ temp/
 tmp/
 *.tmp
 images/
+recordings/
 
 # 依赖目录
 node_modules/
@@ -39,3 +40,6 @@ __pycache__/
 # Arduino 敏感配置文件
 **/secrets.h
 
+# SSH 密钥
+log-camera
+log-camera.pub
