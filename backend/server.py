@@ -502,6 +502,7 @@ async def terminal_input_handler():
                         print(
                             "[Error]: Invalid fps. Expecting integer. Using 10 FPS."
                         )
+                        fps = 10
 
                 payload = {
                     "format": "h264",

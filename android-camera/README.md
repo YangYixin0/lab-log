@@ -20,17 +20,20 @@
 
 数据流大致如下：
 
-1. 服务器从终端输入 `start WIDTHxHEIGHT BITRATE FPS`，向所有客户端广播 `start_capture` 命令；
+1. 服务器从终端输入 `start [WIDTH:HEIGHT] [BITRATE_MB] [FPS]`（例如 `start 4:3 4 10` 或 `start`），向所有客户端广播 `start_capture` 命令；
 2. App 收到命令后：
-   - 记录服务端要求的目标分辨率 / 码率 / FPS；
-   - 相机预览嵌入在主界面上半部分，预览区域宽高比自动匹配服务器要求的分辨率；
+   - 如果命令中包含 `aspectRatio`，更新 UI 中的宽高比选择并用于录制；否则使用当前 UI 中选择的宽高比；
+   - 记录服务端要求的目标宽高比 / 码率（MB） / FPS；
+   - 相机预览嵌入在主界面顶部的**正方形区域**中，预览区域宽高比自动匹配选择的宽高比（4:3 或 16:9）；
    - 使用 CameraX **ViewPort + UseCaseGroup** 确保预览（Preview）和采集（ImageAnalysis）的 FOV 完全一致，用户在预览中看到的画面就是发送到服务器的画面；
-   - 在 `ImageAnalysis` 分析流中按需丢帧，并将图像编码为 H.264（无需额外裁剪，ViewPort 已统一 FOV）；
+   - 在 `ImageAnalysis` 分析流中按需丢帧，并将图像编码为 H.264（ViewPort 已统一 FOV，`computeCropRect` 仅做偶数对齐和越界保护）；
+   - 处理第一帧时，根据设备物理方向计算 rotation 值并发送 `rotation_info` 状态给服务器；
    - 通过 WebSocket 以“带自定义二进制帧头的 H.264 帧”发送给服务器；
 3. 服务器端：
-   - 收到 `capture_started` 状态时打开一个录制会话；
+   - 收到 `capture_started` 状态时打开一个录制会话（初始 rotation 可能为 0）；
+   - 收到 `rotation_info` 状态时更新录制会话的 rotation 值；
    - 按帧解出时间戳和裸 H.264 数据写文件；
-   - 收到 `capture_stopped` 或连接断开时结束会话，调用 `ffmpeg` 生成 MP4。
+   - 收到 `capture_stopped` 或连接断开时结束会话，根据 rotation 值使用 `ffmpeg` 旋转视频并封装成 MP4，同时提取第一帧保存为缩略图。
 
 ---
 
@@ -142,27 +145,36 @@ App 建立 WebSocket 连接后，会主动发送一次 JSON 能力描述：
 服务器在终端输入：
 
 ```text
-start 1600x1200 4000000 5
+# 使用 App 当前选择的宽高比（4:3 或 16:9），码率 4 MB，FPS 10
+start
+
+# 显式指定宽高比为 4:3，码率 4 MB，FPS 10
+start 4:3 4 10
+
+# 显式指定宽高比为 16:9，码率 4 MB，FPS 10
+start 16:9 4 10
 ```
 
-会广播给所有客户端如下 JSON：
+会广播给所有客户端如下 JSON（当提供宽高比时）：
 
 ```json
 {
   "command": "start_capture",
   "payload": {
     "format": "h264",
-    "resolution": { "width": 1600, "height": 1200 },
-    "bitrate": 4000000,
-    "fps": 5
+    "aspectRatio": { "width": 4, "height": 3 },
+    "bitrate": 4,
+    "fps": 10
   }
 }
 ```
 
+（当不提供宽高比时，`aspectRatio` 字段会被省略）
+
 - **参数含义**
   - `format`: 当前固定为 `"h264"`。
-  - `resolution`: 目标编码分辨率。App 会在 CameraX 实际输出的基础上做裁剪。
-  - `bitrate`: 目标码率（bps），直接传给 `MediaFormat.KEY_BIT_RATE`。
+  - `aspectRatio`: 可选，目标宽高比（例如 `4:3`、`16:9`）。如果提供，App 会使用该宽高比进行录制，并更新 UI 中的宽高比选择。如果不提供，App 会使用当前 UI 中选择的宽高比。
+  - `bitrate`: 目标码率（单位 MB，例如 `4` 表示 4 MB/s）。App 会将其转换为 bps（`bitrate * 1000000`）后传给 `MediaFormat.KEY_BIT_RATE`。
   - `fps`:
     - `> 0`：Analyzer 层按该值限制发送帧率，多余帧被丢弃；
     - `0` 或缺省：不限帧率，尽量多发。
@@ -188,9 +200,23 @@ App 在关键状态变更时发送 `ClientStatus`：
 ```json
 {
   "status": "capture_started",
-  "message": "Streaming H.264 at 1600x1200 (5fps)"
+  "message": "Streaming H.264 at 4:3 aspect ratio, 4MB bitrate (10fps)",
+  "rotation": 0
 }
 ```
+
+  - `rotation`: 设备旋转角度（0、90、180、270），表示视频需要旋转多少度才能正过来。初始值可能为 0，后续会通过 `rotation_info` 状态更新。
+
+- 旋转信息更新（第一帧处理后）：
+
+```json
+{
+  "status": "rotation_info",
+  "rotation": 90
+}
+```
+
+  - 当处理第一帧时，App 会根据设备物理方向计算正确的 rotation 值并发送此状态，后端会更新录制会话的 rotation 值。
 
 - 停止推流时：
 
@@ -201,7 +227,7 @@ App 在关键状态变更时发送 `ClientStatus`：
 }
 ```
 
-服务器通过这些状态来创建 / 结束录制会话，并打印友好的日志。
+服务器通过这些状态来创建 / 结束录制会话，并根据 rotation 值在封装 MP4 时进行视频旋转。
 
 ### 4. 帧数据（App → Server）
 
@@ -271,7 +297,9 @@ App 在关键状态变更时发送 `ClientStatus`：
    - 终端会看到类似：
 
      ```text
-     [App Status] ... {"status":"capture_started","message":"Streaming H.264 at 1600x1200 (5fps)"}
+     [App Status] ... {"status":"capture_started","message":"Streaming H.264 at 4:3 aspect ratio, 4MB bitrate (10fps)","rotation":0}
+     [App Status] ... {"status":"rotation_info","rotation":90}
+     [Info]: Updated rotation to 90 for ...
      [Frame]: ... seq=0 timestamp=... size=...
      ...
      ```
@@ -287,10 +315,87 @@ App 在关键状态变更时发送 `ClientStatus`：
 
      ```text
      [Info]: FPS estimate (server) frame_count=57 -> 4.81
+     [Info]: Rotating video by 90 degrees (transpose=1)
+     [Info]: Thumbnail saved to recordings/<client>_<timestamp>/thumbnail.jpg
      [Info]: MP4 saved to recordings/<client>_<timestamp>/stream.mp4
      ```
 
-   - 到 `backend/recordings/` 目录下即可找到对应的 MP4 文件。
+   - 到 `backend/recordings/` 目录下即可找到对应的文件夹，包含：
+     - `stream.h264`：原始 H.264 流
+     - `stream.mp4`：封装后的 MP4 视频（已根据 rotation 旋转）
+     - `thumbnail.jpg`：第一帧的缩略图（已根据 rotation 旋转）
+
+---
+
+## 开发经验与注意事项
+
+### 视频旋转（Rotation）处理
+
+#### 如何正确获取 rotation 值
+
+1. **不要使用 `imageProxy.imageInfo.rotationDegrees` 直接作为 rotation**：
+   - `imageProxy.imageInfo.rotationDegrees` 表示相机传感器相对于屏幕的旋转
+   - 当屏幕方向被锁定时，该值可能不会随设备物理旋转而变化
+   - 直接使用会导致所有方向都返回相同的 rotation 值（通常是 90）
+
+2. **正确方法：使用设备物理方向计算 rotation**：
+   - 使用 `OrientationEventListener` 检测设备的物理方向（相对于重力）
+   - 通过公式计算：`rotationForBackend = (physicalRotation + 90) % 360`
+   - 其中 `physicalRotation` 为：
+     - `0`：设备竖放（正常）
+     - `90`：设备右横（顺时针旋转 90 度）
+     - `180`：设备倒置
+     - `270`：设备左横（逆时针旋转 90 度）
+
+3. **rotation 值的含义**：
+   - `0`：不需要旋转（视频已经是正确的方向）
+   - `90`：需要顺时针旋转 90 度
+   - `180`：需要旋转 180 度
+   - `270`：需要逆时针旋转 90 度（或顺时针 270 度）
+
+#### 设备方向与 rotation 的对应关系
+
+根据实际测试结果：
+
+- **设备竖放（0°）** → rotation = 90（需要旋转 90 度才能正过来）
+- **设备右横（90°）** → rotation = 180（需要旋转 180 度才能正过来）
+- **设备倒置（180°）** → rotation = 270（需要旋转 270 度才能正过来）
+- **设备左横（270°）** → rotation = 0（不需要旋转，视频已经是正确的方向）
+
+> **注意**：手机左横时 rotation 为 0，而不是 180。这是因为相机传感器通常是横向安装的，当设备左横时，传感器相对于重力的方向恰好是 0 度。
+
+#### 后端处理 rotation
+
+后端使用 ffmpeg 的 `transpose` 滤镜来处理旋转：
+
+- `rotation = 90`：使用 `transpose=1`（顺时针旋转 90 度）
+- `rotation = 180`：使用 `transpose=1,transpose=1`（两次 90 度旋转）
+- `rotation = 270`：使用 `transpose=2`（逆时针旋转 90 度）
+- `rotation = 0`：不旋转，直接拷贝
+
+### 条纹伪影（Stripe Artifacts）问题
+
+条纹伪影是视频编码中常见的视觉问题，表现为画面中出现水平或垂直的彩色条纹。在本项目中，以下情况可能导致条纹伪影：
+
+1. **手动旋转 YUV 数据**：
+   - 在 Android 端手动旋转 YUV_420_888 或 NV12 数据时，如果处理不当会导致条纹伪影
+   - **原因**：YUV 数据的 stride（行对齐）和像素对齐要求很严格，手动旋转时如果忽略 stride 或对齐要求，会导致数据错位
+   - **解决方案**：避免在 Android 端手动旋转 YUV 数据，将旋转交给后端的 ffmpeg 处理
+
+2. **裁剪尺寸不对齐**：
+   - 如果裁剪后的视频尺寸不是编码器要求的对齐值（通常是 16 的倍数），可能导致条纹伪影
+   - **解决方案**：确保裁剪后的宽度和高度都是 16 的倍数（或编码器要求的对齐值）
+
+3. **Stride 处理不当**：
+   - YUV_420_888 格式中，Y 平面和 UV 平面可能有不同的 stride
+   - 如果直接按宽度复制数据而忽略 stride，会导致数据错位
+   - **解决方案**：在复制 YUV 数据时，必须考虑 stride，逐行复制而不是按宽度复制
+
+4. **编码器配置问题**：
+   - 如果编码器的颜色格式配置不正确，也可能导致条纹伪影
+   - **解决方案**：确保编码器配置的颜色格式与输入数据格式匹配
+
+> **经验总结**：如果遇到条纹伪影，优先检查是否在 Android 端进行了手动旋转或 YUV 数据处理。最佳实践是将所有旋转操作交给后端的 ffmpeg 处理，这样可以避免 stride 和对齐问题。
 
 ---
 

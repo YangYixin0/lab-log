@@ -161,39 +161,46 @@ ffmpeg -y -f h264 -r <fps> -i stream.h264 -c:v copy stream.mp4
 由 `terminal_input_handler()` 实现，服务器启动后会在终端打印提示：
 
 ```text
-Enter command ('start [w]x[h] [bitrate] [fps]' or 'stop'):
+Enter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'):
+  Example: 'start 4:3 4 10' for 4:3 aspect ratio, 4 MB bitrate, 10 fps
 > 
 ```
 
 支持的命令：
 
-- **`start [w]x[h] [bitrate] [fps]`**
-  - `w` / `h`：目标分辨率，必填，例如 `1600x1200`、`1920x1080`。
-  - `bitrate`：可选，单位 bps，默认 `4000000`（约 4Mbps）。
+- **`start [w]:[h] [bitrate_mb] [fps]`**
+  - `w:h`：宽高比，可选，使用冒号分隔，例如 `4:3`、`16:9`。
+    - 如果提供，App 会使用该宽高比进行录制，并更新 UI 中的宽高比选择。
+    - 如果不提供（仅 `start`），App 会使用当前 UI 中选择的宽高比。
+  - `bitrate_mb`：可选，单位 MB，默认 `4`（约 4MB/s）。
   - `fps`：可选，目标帧率：
     - 默认 `10`；
-    - 负数会被修正为 `0`；
-    - `0` 表示“不限帧率”，App 会尽可能多地发送帧（仅受硬件与网络限制）。
+    - 负数会被修正为 `10`；
+    - `0` 表示"不限帧率"，App 会尽可能多地发送帧（仅受硬件与网络限制）。
   - 示例：
 
     ```text
-    start 1600x1200 4000000 5
-    start 1920x1080 4000000 0
+    start 4:3 4 10
+    start 16:9 4 10
+    start 4 10
+    start
     ```
 
-  - 内部会转换为 JSON：
+  - 内部会转换为 JSON（当提供宽高比时）：
 
     ```json
     {
       "command": "start_capture",
       "payload": {
         "format": "h264",
-        "resolution": { "width": 1600, "height": 1200 },
-        "bitrate": 4000000,
-        "fps": 5
+        "aspectRatio": { "width": 4, "height": 3 },
+        "bitrate": 4,
+        "fps": 10
       }
     }
     ```
+
+    （当不提供宽高比时，`aspectRatio` 字段会被省略）
 
   - 并通过 `broadcast()` 广播给所有 `CONNECTED_CLIENTS`。
 
@@ -235,7 +242,8 @@ Enter command ('start [w]x[h] [bitrate] [fps]' or 'stop'):
    ```text
    WebSocket server started at ws://0.0.0.0:50001
    You can now connect your Android Camera App.
-   Enter command ('start [w]x[h] [bitrate] [fps]' or 'stop'):
+   Enter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'):
+     Example: 'start 4:3 4 10' for 4:3 aspect ratio, 4 MB bitrate, 10 fps
    >
    ```
 
