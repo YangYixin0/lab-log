@@ -23,8 +23,9 @@
 1. 服务器从终端输入 `start WIDTHxHEIGHT BITRATE FPS`，向所有客户端广播 `start_capture` 命令；
 2. App 收到命令后：
    - 记录服务端要求的目标分辨率 / 码率 / FPS；
-   - 打开 CameraX，相机预览显示在手机屏幕上；
-   - 在 `ImageAnalysis` 分析流中按需丢帧，并将图像裁剪+编码为 H.264；
+   - 相机预览嵌入在主界面上半部分，预览区域宽高比自动匹配服务器要求的分辨率；
+   - 使用 CameraX **ViewPort + UseCaseGroup** 确保预览（Preview）和采集（ImageAnalysis）的 FOV 完全一致，用户在预览中看到的画面就是发送到服务器的画面；
+   - 在 `ImageAnalysis` 分析流中按需丢帧，并将图像编码为 H.264（无需额外裁剪，ViewPort 已统一 FOV）；
    - 通过 WebSocket 以“带自定义二进制帧头的 H.264 帧”发送给服务器；
 3. 服务器端：
    - 收到 `capture_started` 状态时打开一个录制会话；
@@ -70,8 +71,8 @@
         - 先通过 `shouldSendFrame(targetFps)` 判断是否需要丢帧：
           - `targetFps <= 0`：不过滤，全部尝试发送；
           - `targetFps > 0`：通过 `System.nanoTime()` 控制最小时间间隔，丢弃多余帧；
-        - 使用 `computeCropRect(imageProxy)` 从 CameraX 实际帧（如 1920×1920）中裁出接近 `requestedWidth × requestedHeight` 的居中区域，并强制宽高为偶数；
-        - 首帧时以裁剪后的尺寸启动 `H264Encoder`，确保编码分辨率与裁剪一致；
+        - 由于使用了 **ViewPort + UseCaseGroup**，`imageProxy.cropRect` 已经对应统一后的取景窗口，`computeCropRect()` 仅做偶数对齐和越界保护，不再额外改变 FOV；
+        - 首帧时以裁剪后的尺寸启动 `H264Encoder`，确保编码分辨率与预览一致；
         - 调用 `encoder.encode(imageProxy, cropRect)` 完成编码；
         - 所有路径最终都会在 `finally` 中 `imageProxy.close()`，避免阻塞 CameraX。
       - 编码回调中：
@@ -91,7 +92,8 @@
       - Y 分量逐行复制，UV 分量按 2×2 block 采样，写成交错的 UV；
       - 强制宽高为偶数，避免硬件编码对齐问题。
     - `computeCropRect(imageProxy: ImageProxy)`：
-      - 基于 `requestedWidth/Height` 从 `imageProxy.cropRect` 中居中裁剪；
+      - **注意**：由于使用了 ViewPort + UseCaseGroup，`imageProxy.cropRect` 已经对应统一后的取景窗口（与预览 FOV 一致）；
+      - 此函数以 `imageProxy.cropRect` 为基础，仅做偶数对齐和越界保护，不再额外改变 FOV；
       - 所有坐标与结果宽高保证为偶数；若裁剪失败则退回“整帧的最近偶数尺寸”。
     - `shouldSendFrame(targetFps: Int)`：
       - 使用 `lastFrameSentTimeNs` 与 `System.nanoTime()` 控制最小发送间隔；
@@ -236,7 +238,7 @@ App 在关键状态变更时发送 `ClientStatus`：
    ```
 
 2. **在 Android Studio 中运行 App**
-   - 打开本目录 `android-camera/` 项目。
+   - 克隆后，用 Android Studio 打开 `lab-log/android-camera/` 目录，而不是 `lab-log/`。等待 Gradle 同步完成。
    - 连接真机或启动模拟器。
    - 点击 Run 安装并启动 App。
 
@@ -246,15 +248,24 @@ App 在关键状态变更时发送 `ClientStatus`：
      - 公网：`ws://your_public_ip_or_domain:50001/android-cam`
    - 开关拨到 ON，连接成功后状态会显示 `Connected, ready for command`。
 
-4. **打开相机预览**
-   - 点击 `Open Camera`，授予相机权限后会看到全屏预览。
-   - 使用系统返回手势可以回到主界面，预览关闭但推流逻辑仍由服务器命令控制。
+4. **相机预览与宽高比选择**
+   - 授予相机权限后，预览会自动显示在主界面顶部的**正方形区域**中；
+   - 预览下方有一个“宽高比”选择（目前提供 4:3 / 16:9 两种），**默认 4:3**；
+   - 预览画面会以 **FIT 方式完整显示** 在正方形 Box 内，可能出现上下/左右黑边，但不会被裁剪；
+   - **重要**：预览使用的宽高比与实际编码发送到服务器的视频完全一致，用户在预览中看到的取景范围就是最终录制的范围。
 
 5. **从服务器开始录制**
    - 在 `backend/server.py` 运行的终端输入，例如：
 
      ```text
-     start 1600x1200 4000000 5
+     # 使用 App 当前选择的宽高比（4:3 或 16:9），码率 4 MB，FPS 10
+     start
+
+     # 显式指定宽高比为 4:3，码率 4 MB，FPS 10
+     start 4:3 4 10
+
+     # 显式指定宽高比为 16:9，码率 4 MB，FPS 10
+     start 16:9 4 10
      ```
 
    - 终端会看到类似：
@@ -287,6 +298,7 @@ App 在关键状态变更时发送 `ClientStatus`：
 
 - **语言 / 运行时**
   - Kotlin（与项目中 Gradle 配置保持一致）
+  - **最低支持 Android 7.0 (API 24)**，目标版本 Android 15 (API 36)
   - Android SDK 33+（建议）
 - **主要库**
   - CameraX：`camera-core` / `camera-camera2` / `camera-lifecycle` / `camera-view`

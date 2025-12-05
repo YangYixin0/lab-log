@@ -14,28 +14,43 @@ import android.media.MediaFormat
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.util.Size
+import android.util.Rational
+import android.util.Size as AndroidSize
+import android.view.Surface
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
+import androidx.camera.core.AspectRatio
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -43,6 +58,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,8 +67,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -103,25 +125,29 @@ data class ServerCommand(val command: String, val payload: CommandPayload? = nul
 /**
  * start_capture 命令的负载格式：
  * - format: 当前仅支持 "h264"
- * - resolution: 目标编码分辨率（宽高）
- * - bitrate: 目标码率（bps）
+ * - aspectRatio: 目标宽高比（width:height，例如 4:3）
+ * - bitrate: 目标码率（MB，例如 4 表示 4MB = 4,000,000 bps）
  * - fps: 期望帧率，0 或 null 表示不限（由设备尽可能多发）
  */
 data class CommandPayload(
     val format: String,
-    val resolution: Resolution,
-    val bitrate: Int,
+    val aspectRatio: AspectRatio,
+    val bitrate: Int,  // In MB, will be converted to bps
     val fps: Int? = null
 )
 
-data class Resolution(val width: Int, val height: Int)
+data class AspectRatio(val width: Int, val height: Int)
 
 /**
  * 发送给服务器的状态消息：
  * - status: "ready" / "capture_started" / "capture_stopped" / "error" 等
  * - message: 用于人类阅读的详细说明
  */
-data class ClientStatus(val status: String, val message: String? = null)
+data class ClientStatus(
+    val status: String,
+    val message: String? = null,
+    val rotation: Int? = null  // 设备旋转角度，后端可用于旋转视频
+)
 
 /**
  * 编码后的单帧 H.264 数据，携带设备侧时间戳（毫秒）
@@ -159,7 +185,7 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
         // MediaCodec 的帧率设置主要给编码器内部参考；真实发送帧率由上层 Analyzer 控制
         val frameRate = if (targetFps > 0) targetFps else 10
         val mediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-            // 使用标准 YUV420 半平面格式（NV12），搭配下面的 toNV12ByteArray() 转换，避免色块/偏色
+            // 使用标准 YUV420 半平面格式（NV12），搭配 toNV12ByteArray() 转换
             setInteger(
                 MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
@@ -168,6 +194,7 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
             setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // Key frame every second
         }
+        Log.d(TAG, "Encoder config: ${width}x${height}")
 
         try {
             mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
@@ -234,6 +261,26 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
         Log.d(TAG, "H.264 Encoder stopped.")
     }
 }
+
+private fun Rect.ensureEvenBounds(maxWidth: Int, maxHeight: Int): Rect {
+    var left = this.left.coerceIn(0, maxWidth - 2)
+    var top = this.top.coerceIn(0, maxHeight - 2)
+    if (left % 2 != 0) left -= 1
+    if (top % 2 != 0) top -= 1
+    var right = this.right.coerceIn(left + 2, maxWidth)
+    var bottom = this.bottom.coerceIn(top + 2, maxHeight)
+    var width = right - left
+    var height = bottom - top
+    if (width % 2 != 0) {
+        right -= 1
+        width -= 1
+    }
+    if (height % 2 != 0) {
+        bottom -= 1
+        height -= 1
+    }
+    return Rect(left, top, right, bottom)
+}
 //endregion
 
 // ViewModel：负责 WebSocket 生命周期管理 + CameraX 分析与编码控制
@@ -242,13 +289,44 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val _uiState = MutableStateFlow(WebSocketUiState())
     val uiState: StateFlow<WebSocketUiState> = _uiState.asStateFlow()
 
+    /**
+     * 当前 UI 选择的宽高比（默认 4:3）。
+     * - 当服务器下发带 aspectRatio 的 start_capture 时，会覆盖为服务器指定的宽高比；
+     * - 当服务器发送纯 \"start\"（不含 aspectRatio）时，将按此处用户选择的宽高比进行采集。
+     */
+    private val _selectedAspectRatio = MutableStateFlow(Rational(4, 3))
+    val selectedAspectRatio: StateFlow<Rational> = _selectedAspectRatio.asStateFlow()
+
+    // 最近一帧的旋转角度（来自 ImageProxy.imageInfo.rotationDegrees），用于 UI 虚线框方向判断
+    private val _lastRotationDegrees = MutableStateFlow(0)
+    val lastRotationDegrees: StateFlow<Int> = _lastRotationDegrees.asStateFlow()
+
+    // 录制时锁定的旋转角度（用于虚线框保持不变），未录制时为 null
+    private val _lockedOverlayRotation = MutableStateFlow<Int?>(null)
+    val lockedOverlayRotation: StateFlow<Int?> = _lockedOverlayRotation.asStateFlow()
+
+    // 设备物理方向（来自 OrientationEventListener，0=竖放, 90=右横, 180=倒置, 270=左横）
+    private val _devicePhysicalRotation = MutableStateFlow(0)
+    
+    // 更新设备物理方向（从 MainContent 的 OrientationEventListener 调用）
+    fun updateDevicePhysicalRotation(rotation: Int) {
+        _devicePhysicalRotation.value = rotation
+    }
+
     private val client = OkHttpClient()
     private var webSocket: WebSocket? = null
     private var h264Encoder: H264Encoder? = null
     private var encoderStarted: Boolean = false
     private var encoderBitrate: Int = 2_000_000
-    private var requestedWidth: Int = 1600
-    private var requestedHeight: Int = 1200
+    // 录制时锁定的裁剪区域，避免会话期间尺寸变化导致编码器问题
+    private var lockedCropRect: Rect? = null
+    var requestedAspectRatio: Rational? = null
+        private set
+    // 用于向后兼容和日志显示
+    var requestedWidth: Int = 0
+        private set
+    var requestedHeight: Int = 0
+        private set
     private var requestedFps: Int = 0
     private var lastFrameSentTimeNs: Long = 0L
     private var droppedFrames: Int = 0
@@ -259,12 +337,89 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     val imageAnalysis = mutableStateOf<ImageAnalysis?>(null)
     private val cameraExecutor = Executors.newSingleThreadExecutor()
 
+    /**
+     * 当用户在主界面切换宽高比选项（4:3 / 16:9）时调用。
+     */
+    fun onAspectRatioSelected(width: Int, height: Int) {
+        val safeWidth = width.coerceAtLeast(1)
+        val safeHeight = height.coerceAtLeast(1)
+        _selectedAspectRatio.value = Rational(safeWidth, safeHeight)
+    }
+
+    /**
+     * 获取硬件支持的最高分辨率（用于 ImageAnalysis）。
+     * 尝试使用硬件支持的最高分辨率，以获得更大的 FOV。
+     */
+    private fun getMaxSupportedResolution(): AndroidSize {
+        val manager = cameraManager ?: return AndroidSize(1920, 1920) // 默认回退
+        return try {
+            var maxSize = AndroidSize(1920, 1920) // 默认值
+            var maxArea = 0L
+
+            manager.cameraIdList?.forEach { cameraId ->
+                val characteristics = manager.getCameraCharacteristics(cameraId)
+                val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                // 只查询后置摄像头
+                if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
+                    val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    val sizes = streamMap?.getOutputSizes(ImageFormat.YUV_420_888) ?: emptyArray()
+                    sizes.forEach { size ->
+                        val area = size.width.toLong() * size.height.toLong()
+                        if (area > maxArea) {
+                            maxArea = area
+                            maxSize = size
+                        }
+                    }
+                }
+            }
+
+            Log.d(TAG, "Max supported resolution for ImageAnalysis: ${maxSize.width}x${maxSize.height}")
+            maxSize
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get max supported resolution", e)
+            AndroidSize(1920, 1920) // 默认回退
+        }
+    }
+
     fun onUrlChange(newUrl: String) {
         _uiState.update { it.copy(url = newUrl) }
     }
 
     fun onConnectToggle(shouldConnect: Boolean) {
         if (shouldConnect) connect() else disconnect()
+    }
+
+    /**
+     * 更新用于虚线框显示的旋转：
+     * - 未录制时，实时跟随图像旋转
+     * - 开始录制时锁定当前旋转，录制期间不再变化
+     */
+    fun updateOverlayRotation(rotationDegrees: Int) {
+        val norm = when ((rotationDegrees % 360 + 360) % 360) {
+            90, 180, 270 -> (rotationDegrees % 360 + 360) % 360
+            else -> 0
+        }
+        if (_uiState.value.isStreaming) {
+            if (_lockedOverlayRotation.value == null) {
+                _lockedOverlayRotation.value = norm
+            }
+        } else {
+            _lockedOverlayRotation.value = null
+            _lastRotationDegrees.value = norm
+        }
+    }
+
+    /**
+     * 在开始录制时锁定当前旋转，结束录制后恢复实时更新
+     */
+    fun lockOverlayRotationOnStart() {
+        if (_lockedOverlayRotation.value == null) {
+            _lockedOverlayRotation.value = _lastRotationDegrees.value
+        }
+    }
+
+    fun unlockOverlayRotationOnStop() {
+        _lockedOverlayRotation.value = null
     }
 
     private fun connect() {
@@ -309,13 +464,29 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 "start_capture" -> {
                     val payload = obj.optJSONObject("payload")
                     if (payload != null) {
-                        val resolutionObj = payload.optJSONObject("resolution")
-                        val width = resolutionObj?.optInt("width", requestedWidth) ?: requestedWidth
-                        val height = resolutionObj?.optInt("height", requestedHeight) ?: requestedHeight
-                        val bitrate = payload.optInt("bitrate", encoderBitrate)
+                        // 解析宽高比（例如 4:3）：
+                        // - 如果服务器下发了 aspectRatio，则强制使用服务器宽高比，并同步更新本地 selectedAspectRatio；
+                        // - 如果未下发 aspectRatio（纯 \"start\"），则使用当前 UI 选择的宽高比。
+                        val aspectRatioObj = payload.optJSONObject("aspectRatio")
+                        val aspectRatio: Rational = if (aspectRatioObj != null) {
+                            val aspectWidth = aspectRatioObj.optInt("width", 4).coerceAtLeast(1)
+                            val aspectHeight = aspectRatioObj.optInt("height", 3).coerceAtLeast(1)
+                            val serverRatio = Rational(aspectWidth, aspectHeight)
+                            // 服务器显式指定宽高比时，覆盖本地选择并同步到 UI
+                            _selectedAspectRatio.value = serverRatio
+                            serverRatio
+                        } else {
+                            // 服务器未指定宽高比：使用当前 UI 选择的宽高比
+                            selectedAspectRatio.value
+                        }
+
+                        // 解析码率（MB），转换为 bps
+                        val bitrateMb = payload.optInt("bitrate", 4) // 默认 4 MB
+                        val bitrateBps = bitrateMb * 1_000_000 // 转换为 bps
+
                         // fps 缺省或为 0 时表示“不限制帧率”，Analyzer 尽可能多发
                         val fps = payload.optInt("fps", 0)
-                        startStreaming(width, height, bitrate, fps)
+                        startStreaming(aspectRatio, bitrateBps, fps)
                     } else {
                         Log.w(TAG, "start_capture payload missing, ignoring")
                     }
@@ -328,13 +499,22 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun startStreaming(width: Int, height: Int, bitrate: Int, fps: Int) {
+    private fun startStreaming(aspectRatio: Rational, bitrate: Int, fps: Int) {
         if (_uiState.value.isStreaming) return
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                requestedWidth = width
-                requestedHeight = height
+                requestedAspectRatio = aspectRatio
+                // 为了向后兼容和日志显示，计算一个示例分辨率（基于宽高比）
+                // 使用常见的宽度作为基准，例如 1920
+                val baseWidth = 1920
+                val calculatedHeight = (baseWidth * aspectRatio.denominator / aspectRatio.numerator).let { h ->
+                    // 确保高度为偶数
+                    if (h % 2 == 0) h else h - 1
+                }
+                requestedWidth = baseWidth
+                requestedHeight = calculatedHeight
+
                 encoderBitrate = bitrate
                 // 记录服务器期望的帧率；负数一律归零（视为不限）
                 requestedFps = fps.coerceAtLeast(0)
@@ -361,29 +541,76 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
 
+                // 获取显示旋转，确保 ImageAnalysis 和 Preview 使用相同的旋转
+                val windowManager = getApplication<Application>().getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+                val displayRotation = windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
+                val targetRotation = when (displayRotation) {
+                    Surface.ROTATION_0 -> Surface.ROTATION_0
+                    Surface.ROTATION_90 -> Surface.ROTATION_90
+                    Surface.ROTATION_180 -> Surface.ROTATION_180
+                    Surface.ROTATION_270 -> Surface.ROTATION_270
+                    else -> Surface.ROTATION_0
+                }
+
+                // 这里不再让 CameraX 按宽高比自行选分辨率，而是：
+                // 1. 使用 CameraCharacteristics 查询后置相机支持的 YUV_420_888 的最大分辨率；
+                // 2. 用 setTargetResolution() 明确要求 ImageAnalysis 使用这个最大分辨率；
+                // 3. 再由 computeCropRect() 按服务器指定的宽高比（例如 4:3 / 16:9）进行裁剪。
+                //
+                // 这样可以保证：
+                // - ImageAnalysis 始终以设备允许的最高分辨率工作（FOV 最大）；
+                // - 服务器看到的编码分辨率严格按命令宽高比（例如 4:3 时得到 1920x1440，而不是 640x480）。
+                val maxResolution = getMaxSupportedResolution()
+                Log.d(
+                    TAG,
+                    "ImageAnalysis targetResolution (max): ${maxResolution.width}x${maxResolution.height}, requestedAspectRatio=${aspectRatio.numerator}:${aspectRatio.denominator}"
+                )
+
                 val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(width, height))
+                    .setTargetResolution(maxResolution) // 始终请求硬件支持的最大 YUV_420_888 分辨率
+                    .setTargetRotation(targetRotation) // 设置与 Preview 相同的旋转
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .apply {
                         setAnalyzer(cameraExecutor) { imageProxy ->
                             try {
+                                // 记录 ImageAnalysis 实际提供的分辨率（仅首次）
+                                if (!encoderStarted) {
+                                    Log.d(TAG, "ImageAnalysis actual resolution: ${imageProxy.width}x${imageProxy.height} (target aspectRatio: ${aspectRatio.numerator}:${aspectRatio.denominator})")
+                                }
+
                                 val encoder = h264Encoder
                                 if (encoder != null) {
+                                    val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                                    // 记录最近一次旋转，用于 UI 虚线框方向（未录制时实时更新，录制时锁定）
+                                    updateOverlayRotation(rotationDegrees)
                                     val targetFps = requestedFps
                                     // 基于服务器给出的目标 FPS 主动丢帧：
                                     // - targetFps <= 0：不过滤，所有帧都尝试编码发送
                                     // - targetFps > 0：按时间间隔丢弃多余帧，平滑控制发送速率
                                     val shouldSend = shouldSendFrame(targetFps)
                                     if (shouldSend) {
-                                        val cropRect = computeCropRect(imageProxy)
+                                        // 使用锁定的裁剪区域（如果有），否则计算新的并锁定
+                                        val cropRect = lockedCropRect ?: computeCropRect(imageProxy, rotationDegrees).also {
+                                            lockedCropRect = it
+                                            Log.d(TAG, "Locked crop rect: ${it.width()}x${it.height()}, rotation=$rotationDegrees")
+                                        }
                                         val frameWidth = cropRect.width()
                                         val frameHeight = cropRect.height()
                                         if (!encoderStarted) {
-                                            // 真正以“裁剪后尺寸”初始化编码器，避免被 CameraX 内部 1920x1920 等实际尺寸干扰
+                                            // 以"裁剪后尺寸"初始化编码器
                                             encoder.start(frameWidth, frameHeight, encoderBitrate, targetFps)
                                             encoderStarted = true
-                                            Log.d(TAG, "H.264 Encoder started with camera resolution ${frameWidth}x${frameHeight}")
+                                            // 根据设备物理方向决定是否需要后端旋转视频：
+                                            // - 竖放（0 或 180）：视频需要旋转 90 度
+                                            // - 横放（90 或 270）：视频不需要旋转
+                                            val physicalRotation = _devicePhysicalRotation.value
+                                            val needsRotation = physicalRotation == 0 || physicalRotation == 180
+                                            val rotationForBackend = if (needsRotation) 90 else 0
+                                            Log.d(TAG, "H.264 Encoder started: ${frameWidth}x${frameHeight}, physicalRotation=$physicalRotation, rotationForBackend=$rotationForBackend")
+                                            // 发送更新的状态，包含正确的旋转角度
+                                            // 后端会使用这个 rotation 值来决定是否旋转视频
+                                            sendStatus(ClientStatus("rotation_info", null, rotationForBackend))
                                         }
                                         encoder.encode(imageProxy, cropRect)
                                     } else if (targetFps > 0) {
@@ -405,9 +632,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 }
 
                 val fpsLabel = formatFpsLabel(requestedFps)
-                val statusMsg = "Streaming H.264 at ${width}x${height} ($fpsLabel)"
+                val bitrateMb = encoderBitrate / 1_000_000
+                val statusMsg = "Streaming H.264 at ${aspectRatio.numerator}:${aspectRatio.denominator} aspect ratio, ${bitrateMb}MB bitrate ($fpsLabel)"
                 _uiState.update { it.copy(isStreaming = true, statusMessage = statusMsg) }
-                sendStatus(ClientStatus("capture_started", statusMsg))
+                // 发送 capture_started 状态，包含当前设备旋转角度，后端可用于旋转视频
+                // 注意：使用 displayRotation 计算实际角度，因为此时 analyzer 可能还没运行
+                val currentRotation = surfaceRotationToDegrees(displayRotation)
+                sendStatus(ClientStatus("capture_started", statusMsg, currentRotation))
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start streaming", e)
@@ -428,6 +659,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             h264Encoder?.stop()
             h264Encoder = null
             encoderStarted = false
+            lockedCropRect = null  // 清除锁定的裁剪区域
             requestedFps = 0
             lastFrameSentTimeNs = 0L
             droppedFrames = 0
@@ -446,6 +678,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 val statusJson = JSONObject().apply {
                     put("status", status.status)
                     status.message?.let { put("message", it) }
+                    status.rotation?.let { put("rotation", it) }
                 }.toString()
                 webSocket?.send(statusJson)
                 Log.d(TAG, "--> Sent status: $statusJson")
@@ -552,37 +785,126 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         return if (fpsValue <= 0) "unlimited fps" else "${fpsValue}fps"
     }
 
-    private fun computeCropRect(imageProxy: ImageProxy): Rect {
-        val sensorRect = imageProxy.cropRect ?: Rect(0, 0, imageProxy.width, imageProxy.height)
-        var targetWidth = min(sensorRect.width(), requestedWidth)
-        var targetHeight = min(sensorRect.height(), requestedHeight)
-        if (targetWidth <= 0 || targetHeight <= 0) {
-            targetWidth = sensorRect.width()
-            targetHeight = sensorRect.height()
+    /**
+     * 计算用于编码的裁剪区域。
+     *
+     * 根据服务器指定的宽高比（aspectRatio），从 imageProxy 中裁剪出匹配该宽高比的区域。
+     * 注意：不根据 rotation 交换宽高比，因为这会导致某些设备上出现条纹伪影。
+     * 手机竖放时视频内容会是旋转的，需要在后端/播放器处理。
+     *
+     * 策略：
+     * 1. 根据 imageProxy 的实际尺寸和请求的宽高比，计算最大的匹配区域
+     * 2. 确保坐标和尺寸为偶数（满足硬件编码器对齐要求）
+     * 3. 进行越界保护
+     */
+    private fun computeCropRect(imageProxy: ImageProxy, rotationDegrees: Int): Rect {
+        val imageWidth = imageProxy.width
+        val imageHeight = imageProxy.height
+        val aspectRatio = requestedAspectRatio ?: Rational(4, 3) // 默认 4:3
+
+        // 调试日志：记录实际收到的图像尺寸和宽高比
+        if (!encoderStarted) {
+            Log.d(TAG, "computeCropRect: imageProxy=${imageWidth}x${imageHeight}, aspectRatio=${aspectRatio.numerator}:${aspectRatio.denominator}, rotation=$rotationDegrees (not applied to crop)")
         }
-        targetWidth = max(2, targetWidth - targetWidth % 2)
-        targetHeight = max(2, targetHeight - targetHeight % 2)
 
-        val horizontalPadding = (sensorRect.width() - targetWidth).coerceAtLeast(0) / 2
-        val verticalPadding = (sensorRect.height() - targetHeight).coerceAtLeast(0) / 2
+        // 计算目标宽高比（不根据 rotation 交换，以避免条纹伪影）
+        val targetAspectRatio = aspectRatio.numerator.toFloat() / aspectRatio.denominator.toFloat()
+        val imageAspectRatio = imageWidth.toFloat() / imageHeight.toFloat()
 
-        var left = sensorRect.left + horizontalPadding
-        var top = sensorRect.top + verticalPadding
+        // 根据宽高比计算裁剪区域
+        val cropWidth: Int
+        val cropHeight: Int
+        val cropLeft: Int
+        val cropTop: Int
+
+        if (imageAspectRatio > targetAspectRatio) {
+            // 图像比目标更宽，需要裁剪宽度（保持高度）
+            cropHeight = imageHeight
+            cropWidth = (imageHeight * targetAspectRatio).toInt()
+            cropLeft = (imageWidth - cropWidth) / 2
+            cropTop = 0
+        } else {
+            // 图像比目标更高，需要裁剪高度（保持宽度）
+            cropWidth = imageWidth
+            cropHeight = (imageWidth / targetAspectRatio).toInt()
+            cropLeft = 0
+            cropTop = (imageHeight - cropHeight) / 2
+        }
+
+        // 确保坐标和尺寸为偶数
+        var left = cropLeft
+        var top = cropTop
+        var right = cropLeft + cropWidth
+        var bottom = cropTop + cropHeight
+
+        // 调整左边界为偶数
         if (left % 2 != 0) left -= 1
-        if (top % 2 != 0) top -= 1
         left = left.coerceAtLeast(0)
+
+        // 调整上边界为偶数
+        if (top % 2 != 0) top -= 1
         top = top.coerceAtLeast(0)
 
-        var right = (left + targetWidth).coerceAtMost(imageProxy.width)
-        var bottom = (top + targetHeight).coerceAtMost(imageProxy.height)
+        // 确保右边界不超过图像宽度，且宽度为偶数
+        right = right.coerceAtMost(imageWidth)
+        var width = right - left
+        if (width % 2 != 0) {
+            right -= 1
+            width -= 1
+        }
 
-        // Ensure even dimensions after clamping
-        if ((right - left) % 2 != 0) right -= 1
-        if ((bottom - top) % 2 != 0) bottom -= 1
+        // 确保下边界不超过图像高度，且高度为偶数
+        bottom = bottom.coerceAtMost(imageHeight)
+        var height = bottom - top
+        if (height % 2 != 0) {
+            bottom -= 1
+            height -= 1
+        }
 
-        if (right <= left || bottom <= top) {
-            // 若裁剪结果非法，则退回到整帧的“最近偶数”尺寸，保证编码安全
-            return Rect(0, 0, imageProxy.width - imageProxy.width % 2, imageProxy.height - imageProxy.height % 2)
+        // 确保宽高比匹配（重新计算以确保精度）
+        var currentAspectRatio = width.toFloat() / height.toFloat()
+        // targetAspectRatio 已在上面计算过（第 675 行），直接使用
+
+        if (kotlin.math.abs(currentAspectRatio - targetAspectRatio) > 0.01f) {
+            // 宽高比不匹配，调整尺寸以匹配宽高比
+            if (currentAspectRatio > targetAspectRatio) {
+                // 当前太宽，减少宽度
+                width = (height * targetAspectRatio).toInt()
+                if (width % 2 != 0) width -= 1
+                right = left + width
+            } else {
+                // 当前太高，减少高度
+                height = (width / targetAspectRatio).toInt()
+                if (height % 2 != 0) height -= 1
+                bottom = top + height
+            }
+        }
+
+        // 额外处理：将高度对齐到 16 的倍数，减少部分解码器在非 16 倍数高度时
+        // 在底部出现绿色条带的问题（常见于 1920x1080 这类分辨率被内部对齐到 1920x1088）。
+        val macroBlockSize = 16
+        val alignedHeight = (height / macroBlockSize) * macroBlockSize
+        if (alignedHeight >= 2 && alignedHeight != height) {
+            val diff = height - alignedHeight
+            val shrinkTop = diff / 2
+            val shrinkBottom = diff - shrinkTop
+            top += shrinkTop
+            bottom -= shrinkBottom
+            // 重新计算高度并保证为偶数
+            if (top % 2 != 0) top -= 1
+            if (bottom % 2 != 0) bottom -= 1
+            height = bottom - top
+        }
+
+        // 安全检查：如果结果无效，退回整帧的最近偶数尺寸
+        if (right <= left || bottom <= top || width < 2 || height < 2) {
+            val safeWidth = imageWidth - (imageWidth % 2)
+            val safeHeight = imageHeight - (imageHeight % 2)
+            return Rect(0, 0, safeWidth.coerceAtLeast(2), safeHeight.coerceAtLeast(2))
+        }
+
+        if (!encoderStarted) {
+            Log.d(TAG, "computeCropRect: final cropRect=Rect($left, $top, $right, $bottom), size=${width}x${height}")
         }
 
         return Rect(left, top, right, bottom)
@@ -645,25 +967,14 @@ fun ImageProxy.toNv12ByteArray(cropRect: Rect): ByteArray {
     return nv12
 }
 
-private fun Rect.ensureEvenBounds(maxWidth: Int, maxHeight: Int): Rect {
-    var left = this.left.coerceIn(0, maxWidth - 2)
-    var top = this.top.coerceIn(0, maxHeight - 2)
-    if (left % 2 != 0) left -= 1
-    if (top % 2 != 0) top -= 1
-    var right = this.right.coerceIn(left + 2, maxWidth)
-    var bottom = this.bottom.coerceIn(top + 2, maxHeight)
-    var width = right - left
-    var height = bottom - top
-    if (width % 2 != 0) {
-        right -= 1
-        width -= 1
-    }
-    if (height % 2 != 0) {
-        bottom -= 1
-        height -= 1
-    }
-    return Rect(left, top, right, bottom)
+private fun surfaceRotationToDegrees(rotation: Int): Int = when (rotation) {
+    Surface.ROTATION_0 -> 0
+    Surface.ROTATION_90 -> 90
+    Surface.ROTATION_180 -> 180
+    Surface.ROTATION_270 -> 270
+    else -> 0
 }
+
 
 data class WebSocketUiState(
     val url: String = "ws://pqzc1405495.bohrium.tech:50001/android-cam",
@@ -690,56 +1001,179 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun MainScreen(modifier: Modifier = Modifier, webSocketViewModel: WebSocketViewModel = viewModel()) {
-    var showCameraPreview by remember { mutableStateOf(false) }
-
-    if (showCameraPreview) {
         val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
 
-        BackHandler {
-            showCameraPreview = false
-        }
-
-        if (cameraPermissionState.status.isGranted) {
-            Box(modifier = modifier.fillMaxSize()) {
-                CameraPreview(webSocketViewModel)
-            }
-        } else {
-            LaunchedEffect(showCameraPreview) {
+    LaunchedEffect(Unit) {
+        if (!cameraPermissionState.status.isGranted) {
                 cameraPermissionState.launchPermissionRequest()
             }
-            Column(modifier = modifier.padding(16.dp), verticalArrangement = Arrangement.Center) {
-                Text("Requesting camera permission...")
-                Spacer(modifier = Modifier.size(16.dp))
-                Button(onClick = { showCameraPreview = false }) {
-                    Text("Back")
                 }
-            }
-        }
-    } else {
+
         MainContent(
-            onCameraClick = { showCameraPreview = true },
             modifier = modifier,
-            webSocketViewModel = webSocketViewModel
+        webSocketViewModel = webSocketViewModel,
+        cameraPermissionGranted = cameraPermissionState.status.isGranted
         )
-    }
 }
 
 @Composable
 fun MainContent(
-    onCameraClick: () -> Unit,
     modifier: Modifier = Modifier,
-    webSocketViewModel: WebSocketViewModel = viewModel()
+    webSocketViewModel: WebSocketViewModel = viewModel(),
+    cameraPermissionGranted: Boolean
 ) {
     val uiState by webSocketViewModel.uiState.collectAsState()
+    // 当前 UI 选择的宽高比（例如 4:3 / 16:9），用于本地预览和在服务器未指定时的默认采集宽高比
+    val selectedAspectRatio by webSocketViewModel.selectedAspectRatio.collectAsState()
+    val context = LocalContext.current
+    
+    // 使用 OrientationEventListener 检测设备物理旋转（即使 Activity 锁定方向也能检测）
+    var deviceRotation by remember { mutableStateOf(0) }
+    DisposableEffect(context) {
+        val orientationListener = object : android.view.OrientationEventListener(context) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                // 将连续的方向角度转换为离散的旋转角度
+                val rotation = when {
+                    orientation >= 315 || orientation < 45 -> 0      // 竖向（正常）
+                    orientation >= 45 && orientation < 135 -> 90     // 右横向
+                    orientation >= 135 && orientation < 225 -> 180   // 倒置
+                    orientation >= 225 && orientation < 315 -> 270   // 左横向
+                    else -> 0
+                }
+                deviceRotation = rotation
+                // 同时更新 ViewModel 中的物理方向状态，用于录制时决定是否需要旋转视频
+                webSocketViewModel.updateDevicePhysicalRotation(rotation)
+            }
+        }
+        if (orientationListener.canDetectOrientation()) {
+            orientationListener.enable()
+        }
+        onDispose { orientationListener.disable() }
+    }
 
     Column(
         modifier = modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Button(onClick = onCameraClick) {
-            Text(text = "Open Camera")
+        // 相机预览区域：主界面顶部的正方形 Box，内部根据宽高比进行 FIT 预览
+        if (cameraPermissionGranted) {
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f) // 固定为正方形区域
+                    .background(Color.Black)
+            ) {
+                val density = LocalDensity.current
+                // 检测设备当前是横向还是竖向（基于物理旋转）
+                // 90 或 270 度为横放，0 或 180 度为竖放
+                val isDeviceLandscape = (deviceRotation == 90 || deviceRotation == 270)
+                
+                // 根据设备方向调整虚线框的宽高比
+                // 虚线框相对于重力方向始终显示为"横向"（宽大于高）
+                // 设备竖放时：使用原始宽高比（如 16:9），虚线框在屏幕上为横向
+                // 设备横放时：翻转宽高比（如 9:16），虚线框在屏幕上为竖向，但相对于重力仍为横向
+                val baseAspectRatio = (webSocketViewModel.requestedAspectRatio ?: selectedAspectRatio).let {
+                    val safeDenominator = if (it.denominator == 0) 1 else it.denominator
+                    Rational(it.numerator, safeDenominator)
+                }
+                val overlayAspectRatio = if (isDeviceLandscape) {
+                    // 设备横放时翻转宽高比
+                    Rational(baseAspectRatio.denominator, baseAspectRatio.numerator)
+                } else {
+                    // 设备竖放时使用原始宽高比
+                    baseAspectRatio
+                }
+
+                // 预览画面填满 Box（显示完整 ImageAnalysis 输出），再叠加虚线框标记实际采集比例区域
+                CameraPreview(
+                    viewModel = webSocketViewModel
+                )
+
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clipToBounds()
+                ) {
+                    val boxWidthPx = size.width
+                    val boxHeightPx = size.height
+                    val ratio = overlayAspectRatio.numerator.toFloat() / overlayAspectRatio.denominator.toFloat()
+                    val (frameWidthPx, frameHeightPx) = if (boxWidthPx / boxHeightPx > ratio) {
+                        val h = boxHeightPx
+                        val w = h * ratio
+                        w to h
+                    } else {
+                        val w = boxWidthPx
+                        val h = w / ratio
+                        w to h
+                    }
+                    val left = (boxWidthPx - frameWidthPx) / 2f
+                    val top = (boxHeightPx - frameHeightPx) / 2f
+
+                    val strokeWidth = with(density) { 2.dp.toPx() }
+                    val dash = with(density) { 6.dp.toPx() }
+                    val gap = with(density) { 4.dp.toPx() }
+
+                    drawRect(
+                        color = Color.Black,
+                        topLeft = Offset(left, top),
+                        size = Size(frameWidthPx, frameHeightPx),
+                        style = Stroke(
+                            width = strokeWidth,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(dash, gap))
+                        )
+                    )
+                }
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f) // 固定为正方形区域
+                    .background(Color.Gray),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "需要相机权限",
+                    color = Color.White
+                )
+            }
+        }
+
+        Text(
+            text = "虚线框内是真正采集的范围",
+            color = Color.DarkGray,
+            fontSize = 12.sp
+        )
+
+        // 宽高比选择控件（4:3 / 16:9）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(text = "宽高比：")
+
+            val is43Selected = selectedAspectRatio.numerator == 4 && selectedAspectRatio.denominator == 3
+            val is169Selected = selectedAspectRatio.numerator == 16 && selectedAspectRatio.denominator == 9
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { webSocketViewModel.onAspectRatioSelected(4, 3) },
+                    enabled = !is43Selected
+                ) {
+                    Text("4:3")
+                }
+                Button(
+                    onClick = { webSocketViewModel.onAspectRatioSelected(16, 9) },
+                    enabled = !is169Selected
+                ) {
+                    Text("16:9")
+                }
+            }
         }
 
         Text("WebSocket URL:")
@@ -780,44 +1214,106 @@ fun MainContent(
 }
 
 @Composable
-fun CameraPreview(viewModel: WebSocketViewModel = viewModel()) {
+fun CameraPreview(
+    viewModel: WebSocketViewModel = viewModel(),
+    onResolutionChanged: (width: Int, height: Int) -> Unit = { _, _ -> }
+) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
     val imageAnalysis by viewModel.imageAnalysis
+    val requestedAspectRatio = viewModel.requestedAspectRatio
+    val requestedWidth = viewModel.requestedWidth
+    val requestedHeight = viewModel.requestedHeight
 
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = {
-            PreviewView(it).apply {
-                this.scaleType = PreviewView.ScaleType.FILL_CENTER
-            }
-        },
-        update = { previewView ->
+    // 当宽高比变化时通知父组件更新预览区域宽高比
+    LaunchedEffect(requestedAspectRatio) {
+        if (requestedAspectRatio != null && requestedWidth > 0 && requestedHeight > 0) {
+            onResolutionChanged(requestedWidth, requestedHeight)
+        }
+    }
+
+    val previewView = remember {
+        PreviewView(context).apply {
+            // 使用 COMPATIBLE + FIT_CENTER，确保在正方形 Box 中完整显示 4:3 / 16:9 画面（可能出现黑边但不裁剪）
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FIT_CENTER
+        }
+    }
+
+    // 当 imageAnalysis 或宽高比变化时，重新绑定相机
+    LaunchedEffect(imageAnalysis, requestedAspectRatio) {
             val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-            cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
                 try {
+            val cameraProvider = cameraProviderFuture.get()
                     cameraProvider.unbindAll()
                     val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
-                    val preview = CameraXPreview.Builder().build().also {
+            // 获取显示旋转，确保 Preview 和 ImageAnalysis 使用相同的旋转
+            val displayRotation = previewView.display.rotation
+            val targetRotation = when (displayRotation) {
+                Surface.ROTATION_0 -> Surface.ROTATION_0
+                Surface.ROTATION_90 -> Surface.ROTATION_90
+                Surface.ROTATION_180 -> Surface.ROTATION_180
+                Surface.ROTATION_270 -> Surface.ROTATION_270
+                else -> Surface.ROTATION_0
+            }
+
+            val preview = CameraXPreview.Builder()
+                .setTargetRotation(targetRotation)
+                .build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
 
-                    val useCases = mutableListOf<androidx.camera.core.UseCase>(preview)
-                    imageAnalysis?.let { useCases.add(it) }
+            // 使用 ViewPort + UseCaseGroup 统一 Preview 和 ImageAnalysis 的 FOV
+            // 创建 ViewPort，优先使用采集中实际生效的宽高比；如果尚未开始采集，则使用当前 UI 选中的宽高比
+            val uiAspectRatio = viewModel.selectedAspectRatio.value
+            val targetAspectRatio = requestedAspectRatio ?: uiAspectRatio
+            val viewPort = ViewPort.Builder(
+                targetAspectRatio,
+                targetRotation // 使用与 Preview 和 ImageAnalysis 相同的旋转
+            ).build()
 
-                    cameraProvider.bindToLifecycle(
+            // 如果 ImageAnalysis 已创建，则在绑定前更新其 targetRotation 与 Preview 一致
+            imageAnalysis?.targetRotation = targetRotation
+
+            // 创建 UseCaseGroup
+            val useCaseGroupBuilder = UseCaseGroup.Builder()
+            useCaseGroupBuilder.addUseCase(preview)
+            imageAnalysis?.let { useCaseGroupBuilder.addUseCase(it) }
+            useCaseGroupBuilder.setViewPort(viewPort)
+            val useCaseGroup = useCaseGroupBuilder.build()
+
+            // 使用 UseCaseGroup 绑定，确保 Preview 和 ImageAnalysis 共享相同的裁剪窗口
+            val camera = cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
-                        *useCases.toTypedArray()
-                    )
+                useCaseGroup
+            )
+
+            // 注意：CameraX 的默认 linearZoom 值就是 0.0（最小变焦，最大 FOV）
+            // 测试发现 setLinearZoom(0.0) 与默认行为一致，而 setLinearZoom(1.0) 会得到很小的 FOV
+            // 因此不需要显式设置，保持默认值即可
+            // 如果需要更小的 FOV（放大），可以调用 camera.cameraControl.setLinearZoom(0.5f) 等值
+            // try {
+            //     val cameraControl: CameraControl = camera.cameraControl
+            //     cameraControl.setLinearZoom(0.0f) // 默认值，无需设置
+            // } catch (e: Exception) {
+            //     Log.w(TAG, "Failed to set linear zoom", e)
+            // }
+
+            val aspectRatioStr = requestedAspectRatio?.let { "${it.numerator}:${it.denominator}" } ?: "default"
+            Log.d(TAG, "Camera bound with imageAnalysis=${imageAnalysis != null}, aspectRatio=$aspectRatioStr")
 
                 } catch (e: Exception) {
                     Log.e(TAG, "Use case binding failed", e)
                 }
-            }, ContextCompat.getMainExecutor(context))
         }
+
+    AndroidView(
+        modifier = Modifier
+            .fillMaxSize()
+            .clipToBounds(),
+        factory = { previewView }
     )
 }
 
@@ -825,6 +1321,6 @@ fun CameraPreview(viewModel: WebSocketViewModel = viewModel()) {
 @Composable
 fun MainContentPreview() {
     LabLogCameraTheme {
-        MainContent(onCameraClick = {})
+        MainContent(cameraPermissionGranted = true)
     }
 }

@@ -44,6 +44,7 @@ class RecordingSession:
         self.last_device_ts_ms: Optional[int] = None
         self.first_arrival_ms: Optional[int] = None
         self.last_arrival_ms: Optional[int] = None
+        self.rotation: int = 0  # 设备旋转角度（0, 90, 180, 270）
 
     def add_frame(self, timestamp_ms: int, arrival_ms: int, payload: bytes):
         """追加一帧 H.264 数据，并记录时间信息。"""
@@ -65,11 +66,11 @@ class RecordingSession:
         结束会话：
         - 先关闭裸码流文件
         - 通过 _determine_fps() 估算实际帧率
-        - 调用 mux_frames_to_mp4 使用 ffmpeg 做封装
+        - 调用 mux_frames_to_mp4 使用 ffmpeg 做封装（可选旋转）
         """
         self.close()
         fps = self._determine_fps()
-        mp4_path = mux_frames_to_mp4(self.raw_path, self.mp4_path, fps)
+        mp4_path = mux_frames_to_mp4(self.raw_path, self.mp4_path, fps, self.rotation)
         return mp4_path
 
     def _determine_fps(self) -> float:
@@ -142,7 +143,7 @@ def parse_frame_packet(packet: bytes):
     return timestamp_ms, frame_seq, payload
 
 
-def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float) -> Optional[Path]:
+def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float, rotation: int = 0) -> Optional[Path]:
     if not raw_path.exists():
         print("[Warning]: Raw H.264 file not found; skip MP4 muxing.")
         return None
@@ -150,20 +151,41 @@ def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float) -> Optional
     # 使用 ffmpeg 将裸 H.264 比特流封装为 MP4：
     # - 通过 -f h264 告诉 ffmpeg 输入格式
     # - 通过 -r <fps> 显式指定帧率，避免 ffmpeg 依赖不可靠的码流推断
-    # - -c:v copy 直接拷贝视频轨，无重编码，速度快且无损
-    cmd = [
-        os.environ.get("FFMPEG_BIN", "ffmpeg"),
-        "-y",
-        "-f",
-        "h264",
-        "-r",
-        f"{fps:.2f}",
-        "-i",
-        str(raw_path),
-        "-c:v",
-        "copy",
-        str(output_path),
-    ]
+    # - 如果 rotation 为 90 或 270，需要重新编码以旋转视频
+    # - 否则 -c:v copy 直接拷贝视频轨，无重编码，速度快且无损
+    
+    needs_rotation = rotation in (90, 270)
+    
+    if needs_rotation:
+        # 需要旋转：使用 transpose 滤镜
+        # transpose=1: 顺时针旋转 90 度
+        # transpose=2: 逆时针旋转 90 度
+        transpose_value = "1" if rotation == 90 else "2"
+        print(f"[Info]: Rotating video by {rotation} degrees (transpose={transpose_value})")
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-r", f"{fps:.2f}",
+            "-i", str(raw_path),
+            "-vf", f"transpose={transpose_value}",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            str(output_path),
+        ]
+    else:
+        # 不需要旋转：直接拷贝
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-r", f"{fps:.2f}",
+            "-i", str(raw_path),
+            "-c:v", "copy",
+            str(output_path),
+        ]
+    
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print("[Error]: ffmpeg failed to mux MP4")
@@ -173,12 +195,13 @@ def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float) -> Optional
     return output_path
 
 
-def start_recording(websocket, client_id: str):
+def start_recording(websocket, client_id: str, rotation: int = 0):
     if websocket in RECORDING_SESSIONS:
         finalize_recording(websocket, client_id)
     session = RecordingSession(client_id)
+    session.rotation = rotation
     RECORDING_SESSIONS[websocket] = session
-    print(f"[Info]: Started recording session at {session.session_dir}")
+    print(f"[Info]: Started recording session at {session.session_dir} (rotation={rotation})")
 
 
 def finalize_recording(websocket, client_id: str):
@@ -201,7 +224,7 @@ async def consumer_handler(websocket):
     """
     client_id = f"{websocket.remote_address[0]}_{websocket.remote_address[1]}"
     print(f"[Info]: Client {client_id} consumer handler started.")
-
+    
     try:
         async for message in websocket:
             if isinstance(message, str):
@@ -211,12 +234,20 @@ async def consumer_handler(websocket):
                     data = json.loads(message)
                     status = data.get("status")
                     if status == "capture_started":
-                        start_recording(websocket, client_id)
+                        rotation = data.get("rotation", 0)
+                        start_recording(websocket, client_id, rotation)
+                    elif status == "rotation_info":
+                        # 从第一帧获取的真实旋转角度，更新 recording session
+                        rotation = data.get("rotation", 0)
+                        session = RECORDING_SESSIONS.get(websocket)
+                        if session:
+                            session.rotation = rotation
+                            print(f"[Info]: Updated rotation to {rotation} for {client_id}")
                     elif status == "capture_stopped":
                         finalize_recording(websocket, client_id)
                 except (json.JSONDecodeError, TypeError):
-                    pass  # Not a JSON we care about, just ignore.
-
+                    # 不是我们关心的 JSON，忽略
+                    pass
             else:
                 # 二进制：H.264 帧（带自定义帧头）
                 session = RECORDING_SESSIONS.get(websocket)
@@ -291,7 +322,8 @@ async def terminal_input_handler():
             command_str = await loop.run_in_executor(
                 None,
                 lambda: input(
-                    "\nEnter command ('start [w]x[h] [bitrate] [fps]' or 'stop'): \n> "
+                    "\nEnter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'): \n"
+                    "  Example: 'start 4:3 4 10' for 4:3 aspect ratio, 4 MB bitrate, 10 fps\n> "
                 ),
             )
             parts = command_str.lower().split()
@@ -300,25 +332,37 @@ async def terminal_input_handler():
             command = parts[0]
 
             if command == "start":
-                width, height = 1600, 1200  # Default resolution
-                bitrate = 4_000_000  # Default 4 Mbps
-                fps = 10  # 0 means unlimited
+                # 默认参数：码率和 FPS；宽高比是否下发由命令是否携带参数决定
+                aspect_width, aspect_height = 4, 3  # 默认宽高比，仅在带参数时才下发
+                bitrate_mb = 4  # 默认 4 MB（会在客户端转换为 bps）
+                fps = 10  # 默认 10 FPS
 
-                if len(parts) > 1:
+                # 是否由服务器显式指定宽高比：
+                # - 纯 "start"           -> 不下发 aspectRatio 字段，交由客户端使用当前 UI 选择的宽高比
+                # - "start 4:3 ..." 等   -> 在 payload 中下发 aspectRatio，强制客户端使用该宽高比
+                include_aspect_ratio = len(parts) > 1
+
+                if include_aspect_ratio:
                     try:
-                        width, height = map(int, parts[1].split("x"))
-                    except ValueError:
+                        aspect_width, aspect_height = map(int, parts[1].split(":"))
+                        if aspect_width <= 0 or aspect_height <= 0:
+                            raise ValueError("Aspect ratio must be positive")
+                    except (ValueError, IndexError):
                         print(
-                            "[Error]: Invalid resolution format. Use 'WIDTHxHEIGHT', e.g., '1920x1080'. Using default."
+                            "[Error]: Invalid aspect ratio format. Use 'WIDTH:HEIGHT', e.g., '4:3' or '16:9'. Using default 4:3."
                         )
+                        aspect_width, aspect_height = 4, 3
 
                 if len(parts) > 2:
                     try:
-                        bitrate = int(parts[2])
+                        bitrate_mb = int(parts[2])
+                        if bitrate_mb <= 0:
+                            raise ValueError("Bitrate must be positive")
                     except ValueError:
                         print(
-                            "[Error]: Invalid bitrate. Expecting integer bits-per-second. Using default."
+                            "[Error]: Invalid bitrate. Expecting positive integer (MB). Using default 4 MB."
                         )
+                        bitrate_mb = 4
 
                 if len(parts) > 3:
                     try:
@@ -330,15 +374,21 @@ async def terminal_input_handler():
                             "[Error]: Invalid fps. Expecting integer. Using 10 FPS."
                         )
 
+                payload = {
+                    "format": "h264",
+                    "bitrate": bitrate_mb,  # In MB, client will convert to bps
+                    "fps": fps,
+                }
+                if include_aspect_ratio:
+                    payload["aspectRatio"] = {
+                        "width": aspect_width,
+                        "height": aspect_height,
+                    }
+
                 message = json.dumps(
                     {
                         "command": "start_capture",
-                        "payload": {
-                            "format": "h264",
-                            "resolution": {"width": width, "height": height},
-                            "bitrate": bitrate,
-                            "fps": fps,
-                        },
+                        "payload": payload,
                     }
                 )
                 await broadcast(message)
@@ -353,7 +403,7 @@ async def terminal_input_handler():
             break
         except Exception as e:
             print(f"[Error] in terminal handler: {e}")
-            break
+            continue
 
 
 # The main function to start the server and the terminal handler
