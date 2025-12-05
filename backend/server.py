@@ -38,6 +38,7 @@ class RecordingSession:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.raw_path = self.session_dir / "stream.h264"
         self.mp4_path = self.session_dir / "stream.mp4"
+        self.thumbnail_path = self.session_dir / "thumbnail.jpg"
         self.raw_file = self.raw_path.open("wb")
         self.frame_count = 0
         self.first_device_ts_ms: Optional[int] = None
@@ -67,10 +68,14 @@ class RecordingSession:
         - 先关闭裸码流文件
         - 通过 _determine_fps() 估算实际帧率
         - 调用 mux_frames_to_mp4 使用 ffmpeg 做封装（可选旋转）
+        - 提取第一帧并保存为缩略图
         """
         self.close()
         fps = self._determine_fps()
         mp4_path = mux_frames_to_mp4(self.raw_path, self.mp4_path, fps, self.rotation)
+        if mp4_path:
+            # 提取第一帧并保存为缩略图
+            extract_first_frame(self.raw_path, self.thumbnail_path, self.rotation)
         return mp4_path
 
     def _determine_fps(self) -> float:
@@ -151,31 +156,68 @@ def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float, rotation: i
     # 使用 ffmpeg 将裸 H.264 比特流封装为 MP4：
     # - 通过 -f h264 告诉 ffmpeg 输入格式
     # - 通过 -r <fps> 显式指定帧率，避免 ffmpeg 依赖不可靠的码流推断
-    # - 如果 rotation 为 90 或 270，需要重新编码以旋转视频
+    # - 如果 rotation 不为 0，需要重新编码以旋转视频
     # - 否则 -c:v copy 直接拷贝视频轨，无重编码，速度快且无损
     
-    needs_rotation = rotation in (90, 270)
-    
-    if needs_rotation:
-        # 需要旋转：使用 transpose 滤镜
-        # transpose=1: 顺时针旋转 90 度
-        # transpose=2: 逆时针旋转 90 度
-        transpose_value = "1" if rotation == 90 else "2"
-        print(f"[Info]: Rotating video by {rotation} degrees (transpose={transpose_value})")
+    if rotation == 0:
+        # 不需要旋转：直接拷贝
         cmd = [
             os.environ.get("FFMPEG_BIN", "ffmpeg"),
             "-y",
             "-f", "h264",
             "-r", f"{fps:.2f}",
             "-i", str(raw_path),
-            "-vf", f"transpose={transpose_value}",
+            "-c:v", "copy",
+            str(output_path),
+        ]
+    elif rotation == 90:
+        # 顺时针旋转 90 度：使用 transpose=1
+        print(f"[Info]: Rotating video by {rotation} degrees (transpose=1)")
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-r", f"{fps:.2f}",
+            "-i", str(raw_path),
+            "-vf", "transpose=1",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            str(output_path),
+        ]
+    elif rotation == 180:
+        # 旋转 180 度：使用 transpose=1,transpose=1（两次 90 度旋转）
+        print(f"[Info]: Rotating video by {rotation} degrees (transpose=1,transpose=1)")
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-r", f"{fps:.2f}",
+            "-i", str(raw_path),
+            "-vf", "transpose=1,transpose=1",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            str(output_path),
+        ]
+    elif rotation == 270:
+        # 逆时针旋转 90 度（或顺时针 270 度）：使用 transpose=2
+        print(f"[Info]: Rotating video by {rotation} degrees (transpose=2)")
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-r", f"{fps:.2f}",
+            "-i", str(raw_path),
+            "-vf", "transpose=2",
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "18",
             str(output_path),
         ]
     else:
-        # 不需要旋转：直接拷贝
+        # 未知角度，不旋转
+        print(f"[Warning]: Unknown rotation angle {rotation}, skipping rotation")
         cmd = [
             os.environ.get("FFMPEG_BIN", "ffmpeg"),
             "-y",
@@ -192,6 +234,85 @@ def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float, rotation: i
         print(result.stderr.strip())
         return None
 
+    return output_path
+
+
+def extract_first_frame(raw_path: Path, output_path: Path, rotation: int = 0) -> Optional[Path]:
+    """
+    从 H.264 文件中提取第一帧并保存为 JPEG 图片。
+    如果 rotation 不为 0，会同时旋转图片以匹配视频的旋转。
+    """
+    if not raw_path.exists():
+        print("[Warning]: Raw H.264 file not found; skip thumbnail extraction.")
+        return None
+
+    if rotation == 0:
+        # 不需要旋转：直接提取第一帧
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-i", str(raw_path),
+            "-vframes", "1",
+            "-q:v", "2",  # 高质量 JPEG (2-31, 2 是最高质量)
+            str(output_path),
+        ]
+    elif rotation == 90:
+        # 顺时针旋转 90 度：使用 transpose=1
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-i", str(raw_path),
+            "-vf", "transpose=1",
+            "-vframes", "1",
+            "-q:v", "2",
+            str(output_path),
+        ]
+    elif rotation == 180:
+        # 旋转 180 度：使用 transpose=1,transpose=1（两次 90 度旋转）
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-i", str(raw_path),
+            "-vf", "transpose=1,transpose=1",
+            "-vframes", "1",
+            "-q:v", "2",
+            str(output_path),
+        ]
+    elif rotation == 270:
+        # 逆时针旋转 90 度（或顺时针 270 度）：使用 transpose=2
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-i", str(raw_path),
+            "-vf", "transpose=2",
+            "-vframes", "1",
+            "-q:v", "2",
+            str(output_path),
+        ]
+    else:
+        # 未知角度，不旋转
+        print(f"[Warning]: Unknown rotation angle {rotation} for thumbnail, skipping rotation")
+        cmd = [
+            os.environ.get("FFMPEG_BIN", "ffmpeg"),
+            "-y",
+            "-f", "h264",
+            "-i", str(raw_path),
+            "-vframes", "1",
+            "-q:v", "2",
+            str(output_path),
+        ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("[Warning]: ffmpeg failed to extract thumbnail")
+        print(result.stderr.strip())
+        return None
+
+    print(f"[Info]: Thumbnail saved to {output_path}")
     return output_path
 
 
@@ -303,7 +424,15 @@ async def broadcast(message):
     """
     if CONNECTED_CLIENTS:
         print(f"[Broadcast]: Sending to {len(CONNECTED_CLIENTS)} client(s): {message}")
-        await asyncio.wait([client.send(message) for client in CONNECTED_CLIENTS])
+        # 使用 gather 而不是 wait，以便正确处理断开连接的客户端
+        results = await asyncio.gather(
+            *[client.send(message) for client in CONNECTED_CLIENTS],
+            return_exceptions=True
+        )
+        # 记录发送失败的客户端
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"[Broadcast]: Failed to send to a client: {result}")
     else:
         print("[Broadcast]: No clients connected to send message.")
 

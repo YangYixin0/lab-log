@@ -601,13 +601,16 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                             // 以"裁剪后尺寸"初始化编码器
                                             encoder.start(frameWidth, frameHeight, encoderBitrate, targetFps)
                                             encoderStarted = true
-                                            // 根据设备物理方向决定是否需要后端旋转视频：
-                                            // - 竖放（0 或 180）：视频需要旋转 90 度
-                                            // - 横放（90 或 270）：视频不需要旋转
+                                            // 计算需要旋转的角度：
+                                            // 根据实际测试结果：
+                                            // - 设备竖放（0°）：需要旋转90°才能正过来
+                                            // - 设备右横（90°）：需要旋转180°才能正过来
+                                            // - 设备倒置（180°）：需要旋转270°才能正过来
+                                            // - 设备左横（270°）：需要旋转0°（不需要旋转）
+                                            // 因此，rotationForBackend = (physicalRotation + 90) % 360
                                             val physicalRotation = _devicePhysicalRotation.value
-                                            val needsRotation = physicalRotation == 0 || physicalRotation == 180
-                                            val rotationForBackend = if (needsRotation) 90 else 0
-                                            Log.d(TAG, "H.264 Encoder started: ${frameWidth}x${frameHeight}, physicalRotation=$physicalRotation, rotationForBackend=$rotationForBackend")
+                                            val rotationForBackend = (physicalRotation + 90) % 360
+                                            Log.d(TAG, "H.264 Encoder started: ${frameWidth}x${frameHeight}, physicalRotation=$physicalRotation, imageRotation=$rotationDegrees, rotationForBackend=$rotationForBackend")
                                             // 发送更新的状态，包含正确的旋转角度
                                             // 后端会使用这个 rotation 值来决定是否旋转视频
                                             sendStatus(ClientStatus("rotation_info", null, rotationForBackend))
@@ -1242,11 +1245,11 @@ fun CameraPreview(
 
     // 当 imageAnalysis 或宽高比变化时，重新绑定相机
     LaunchedEffect(imageAnalysis, requestedAspectRatio) {
+        try {
             val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                try {
             val cameraProvider = cameraProviderFuture.get()
-                    cameraProvider.unbindAll()
-                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            cameraProvider.unbindAll()
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
             // 获取显示旋转，确保 Preview 和 ImageAnalysis 使用相同的旋转
             val displayRotation = previewView.display.rotation
@@ -1261,8 +1264,8 @@ fun CameraPreview(
             val preview = CameraXPreview.Builder()
                 .setTargetRotation(targetRotation)
                 .build().also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
 
             // 使用 ViewPort + UseCaseGroup 统一 Preview 和 ImageAnalysis 的 FOV
             // 创建 ViewPort，优先使用采集中实际生效的宽高比；如果尚未开始采集，则使用当前 UI 选中的宽高比
@@ -1285,8 +1288,8 @@ fun CameraPreview(
 
             // 使用 UseCaseGroup 绑定，确保 Preview 和 ImageAnalysis 共享相同的裁剪窗口
             val camera = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
+                lifecycleOwner,
+                cameraSelector,
                 useCaseGroup
             )
 
@@ -1304,9 +1307,9 @@ fun CameraPreview(
             val aspectRatioStr = requestedAspectRatio?.let { "${it.numerator}:${it.denominator}" } ?: "default"
             Log.d(TAG, "Camera bound with imageAnalysis=${imageAnalysis != null}, aspectRatio=$aspectRatioStr")
 
-                } catch (e: Exception) {
-                    Log.e(TAG, "Use case binding failed", e)
-                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Use case binding failed", e)
+        }
         }
 
     AndroidView(
