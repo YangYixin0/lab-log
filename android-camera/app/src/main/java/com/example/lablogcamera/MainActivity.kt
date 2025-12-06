@@ -33,13 +33,13 @@ import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
 import androidx.camera.core.AspectRatio
 import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -211,11 +211,18 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
     }
 
     @SuppressLint("UnsafeOptInUsageError")
-    fun encode(image: ImageProxy, cropRect: Rect, rotationDegrees: Int = 0) {
+    fun encode(
+        image: ImageProxy,
+        cropRect: Rect,
+        rotationDegrees: Int = 0,
+        timestamp: String? = null,
+        charWidth: Int = 12,
+        charHeight: Int = 18
+    ) {
         val codec = mediaCodec ?: return
         try {
             // 将整帧转换和编码过程都放在 try 中，防止异常向外抛出导致 Analyzer 中断
-            val yuvBytes = image.toNv12ByteArray(cropRect, rotationDegrees)
+            val yuvBytes = image.toNv12ByteArray(cropRect, rotationDegrees, timestamp, charWidth, charHeight)
 
             val inputBufferIndex = codec.dequeueInputBuffer(10000) // 10ms timeout
             if (inputBufferIndex >= 0) {
@@ -285,6 +292,476 @@ private fun Rect.ensureEvenBounds(maxWidth: Int, maxHeight: Int): Rect {
 }
 //endregion
 
+//region 时间戳水印
+/**
+ * 字符位图模板（12×18 和 16×24 两种尺寸）
+ * 使用简单的位图数组表示，1=白色像素，0=背景
+ */
+object TimestampFont {
+    // 12×18 像素字符位图
+    private val CHAR_0_12x18 = arrayOf(
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_1_12x18 = arrayOf(
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_2_12x18 = arrayOf(
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_3_12x18 = arrayOf(
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_4_12x18 = arrayOf(
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_5_12x18 = arrayOf(
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_6_12x18 = arrayOf(
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_7_12x18 = arrayOf(
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_8_12x18 = arrayOf(
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_9_12x18 = arrayOf(
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_COLON_12x18 = arrayOf(
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_SPACE_12x18 = arrayOf(
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_T_12x18 = arrayOf(
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_i_12x18 = arrayOf(
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0),
+        intArrayOf(0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0),
+        intArrayOf(0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_m_12x18 = arrayOf(
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    private val CHAR_e_12x18 = arrayOf(
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        intArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),
+        intArrayOf(0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0),
+        intArrayOf(0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0),
+        intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    
+    // 字符映射表（12×18）
+    private val charMap12x18 = mapOf(
+        '0' to CHAR_0_12x18,
+        '1' to CHAR_1_12x18,
+        '2' to CHAR_2_12x18,
+        '3' to CHAR_3_12x18,
+        '4' to CHAR_4_12x18,
+        '5' to CHAR_5_12x18,
+        '6' to CHAR_6_12x18,
+        '7' to CHAR_7_12x18,
+        '8' to CHAR_8_12x18,
+        '9' to CHAR_9_12x18,
+        ':' to CHAR_COLON_12x18,
+        ' ' to CHAR_SPACE_12x18,
+        'T' to CHAR_T_12x18,
+        'i' to CHAR_i_12x18,
+        'm' to CHAR_m_12x18,
+        'e' to CHAR_e_12x18
+    )
+    
+    /**
+     * 获取字符位图（12×18）
+     */
+    fun getCharBitmap12x18(char: Char): Array<IntArray>? {
+        return charMap12x18[char]
+    }
+    
+    /**
+     * 获取字符位图（16×24）- 通过缩放 12×18 得到
+     * 使用简单的最近邻插值
+     */
+    fun getCharBitmap16x24(char: Char): Array<IntArray>? {
+        val bitmap12x18 = charMap12x18[char] ?: return null
+        val scaled = Array(24) { IntArray(16) }
+        for (row in 0 until 24) {
+            for (col in 0 until 16) {
+                val srcRow = (row * 18) / 24
+                val srcCol = (col * 12) / 16
+                scaled[row][col] = bitmap12x18[srcRow][srcCol]
+            }
+        }
+        return scaled
+    }
+}
+
+/**
+ * 在 NV12 数据的 Y 平面上绘制时间戳水印
+ * @param nv12 NV12 字节数组（Y 平面在前，UV 平面在后）
+ * @param width 图像宽度
+ * @param height 图像高度
+ * @param timestamp 时间戳字符串（格式："Time: hh:mm:ss"）
+ * @param charWidth 字符宽度（12 或 16）
+ * @param charHeight 字符高度（18 或 24）
+ * @param offsetX 左上角 X 偏移（默认 10）
+ * @param offsetY 左上角 Y 偏移（默认 10）
+ */
+fun drawTimestampOnNv12(
+    nv12: ByteArray,
+    width: Int,
+    height: Int,
+    timestamp: String,
+    charWidth: Int = 12,
+    charHeight: Int = 18,
+    offsetX: Int = 10,
+    offsetY: Int = 10
+) {
+    // 确保偏移为偶数
+    val x = (offsetX / 2) * 2
+    val y = (offsetY / 2) * 2
+    
+    // 计算文本区域大小
+    val textWidth = timestamp.length * charWidth
+    val textHeight = charHeight
+    val padding = 4
+    val bgWidth = textWidth + padding * 2
+    val bgHeight = textHeight + padding * 2
+    
+    // 确保背景区域不越界
+    if (x + bgWidth > width || y + bgHeight > height) {
+        return
+    }
+    
+    // 绘制黑色背景矩形
+    val bgY = 0.toByte()  // 黑色
+    for (row in y until (y + bgHeight).coerceAtMost(height)) {
+        for (col in x until (x + bgWidth).coerceAtMost(width)) {
+            val index = row * width + col
+            if (index < nv12.size) {
+                nv12[index] = bgY
+            }
+        }
+    }
+    
+    // 绘制白色文字
+    val textStartX = x + padding
+    val textStartY = y + padding
+    var charOffsetX = 0
+    
+    for (char in timestamp) {
+        val charBitmap = when {
+            charWidth == 12 && charHeight == 18 -> TimestampFont.getCharBitmap12x18(char)
+            charWidth == 16 && charHeight == 24 -> TimestampFont.getCharBitmap16x24(char)
+            else -> null
+        } ?: continue
+        
+        // 绘制字符
+        for (row in 0 until charHeight) {
+            for (col in 0 until charWidth) {
+                val dstY = textStartY + row
+                val dstX = textStartX + charOffsetX + col
+                
+                if (dstY < height && dstX < width) {
+                    val index = dstY * width + dstX
+                    if (index < nv12.size) {
+                        if (charBitmap[row][col] == 1) {
+                            nv12[index] = 255.toByte()  // 白色
+                        }
+                    }
+                }
+            }
+        }
+        
+        charOffsetX += charWidth
+    }
+}
+//endregion
+
 // ViewModel：负责 WebSocket 生命周期管理 + CameraX 分析与编码控制
 class WebSocketViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -315,10 +792,62 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     // 设备物理方向（来自 OrientationEventListener，0=竖放, 90=右横, 180=倒置, 270=左横）
     private val _devicePhysicalRotation = MutableStateFlow(0)
-
+    
     // 更新设备物理方向（从 MainContent 的 OrientationEventListener 调用）
     fun updateDevicePhysicalRotation(rotation: Int) {
         _devicePhysicalRotation.value = rotation
+    }
+    
+    // 时间戳水印配置
+    // 可选值：
+    // - TIMESTAMP_MODE_NONE: 无时间戳
+    // - TIMESTAMP_MODE_12x18: 使用 12×18 字体
+    // - TIMESTAMP_MODE_16x24: 使用 16×24 字体
+    private val TIMESTAMP_MODE_NONE = 0
+    private val TIMESTAMP_MODE_12x18 = 1
+    private val TIMESTAMP_MODE_16x24 = 2
+    
+    // 修改此变量以切换时间戳模式
+    private val timestampMode = TIMESTAMP_MODE_16x24  // 默认使用 16×24
+    
+    // 根据模式获取字符尺寸
+    private fun getTimestampCharWidth(): Int = when (timestampMode) {
+        TIMESTAMP_MODE_12x18 -> 12
+        TIMESTAMP_MODE_16x24 -> 16
+        else -> 12  // 默认值，实际不会使用（因为无时间戳时不调用）
+    }
+    
+    private fun getTimestampCharHeight(): Int = when (timestampMode) {
+        TIMESTAMP_MODE_12x18 -> 18
+        TIMESTAMP_MODE_16x24 -> 24
+        else -> 18  // 默认值，实际不会使用（因为无时间戳时不调用）
+    }
+    
+    // 时间戳缓存（每秒更新一次）
+    @Volatile
+    private var cachedTimestamp: String = ""
+    @Volatile
+    private var cachedTimestampSecond: Long = -1
+    
+    /**
+     * 获取当前时间戳字符串，格式为 "Time: hh:mm:ss"（24小时格式）
+     * 每秒更新一次缓存，减少字符串格式化开销
+     */
+    fun getCurrentTimestampString(): String {
+        val currentTime = System.currentTimeMillis()
+        val currentSecond = currentTime / 1000
+        
+        if (currentSecond != cachedTimestampSecond) {
+            val calendar = java.util.Calendar.getInstance()
+            calendar.timeInMillis = currentTime
+            val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
+            val minute = calendar.get(java.util.Calendar.MINUTE)
+            val second = calendar.get(java.util.Calendar.SECOND)
+            cachedTimestamp = String.format("Time: %02d:%02d:%02d", hour, minute, second)
+            cachedTimestampSecond = currentSecond
+        }
+        
+        return cachedTimestamp
     }
 
     private val client = OkHttpClient()
@@ -349,6 +878,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     val imageAnalysis = mutableStateOf<ImageAnalysis?>(null)
     private val cameraExecutor = Executors.newSingleThreadExecutor()
 
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun applyRotateAndCrop(extender: Camera2Interop.Extender<*>) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
@@ -816,11 +1346,25 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                             Log.d(TAG, "H.264 Encoder started: ${frameWidth}x${frameHeight}, physicalRotation=$physicalRotation, cameraFacing=$currentFacing, rotationForAndroid=$rotationDegreesForAndroid")
                                         }
 
-                                        // 调用 encode，传入旋转角度
-                                        // 需要修改 H264Encoder.encode 来接受旋转角度
-                                        // 或者直接在 encode 中调用 toNv12ByteArray 时传入旋转角度
-                                        // 让我先修改 H264Encoder.encode
-                                        encoder.encode(imageProxy, cropRect, rotationDegreesForAndroid)
+                                        // 调用 encode，根据配置决定是否传入时间戳
+                                        if (timestampMode != TIMESTAMP_MODE_NONE) {
+                                            val timestamp = getCurrentTimestampString()
+                                            encoder.encode(
+                                                imageProxy,
+                                                cropRect,
+                                                rotationDegreesForAndroid,
+                                                timestamp,
+                                                getTimestampCharWidth(),
+                                                getTimestampCharHeight()
+                                            )
+                                        } else {
+                                            // 无时间戳模式
+                                            encoder.encode(
+                                                imageProxy,
+                                                cropRect,
+                                                rotationDegreesForAndroid
+                                            )
+                                        }
                                     } else if (targetFps > 0) {
                                         droppedFrames++
                                         if (droppedFrames <= 5 || droppedFrames % targetFps == 0) {
@@ -1112,9 +1656,18 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
  *
  * @param cropRect 裁剪区域（基于旋转后的图像尺寸）
  * @param rotationDegrees 旋转角度（0, 90, 180, 270）
+ * @param timestamp 时间戳字符串（可选，格式："Time: hh:mm:ss"），如果为 null 则不绘制
+ * @param charWidth 字符宽度（12 或 16）
+ * @param charHeight 字符高度（18 或 24）
  */
 @SuppressLint("UnsafeOptInUsageError")
-fun ImageProxy.toNv12ByteArray(cropRect: Rect, rotationDegrees: Int = 0): ByteArray {
+fun ImageProxy.toNv12ByteArray(
+    cropRect: Rect,
+    rotationDegrees: Int = 0,
+    timestamp: String? = null,
+    charWidth: Int = 12,
+    charHeight: Int = 18
+): ByteArray {
     val imageWidth = width
     val imageHeight = height
 
@@ -1163,6 +1716,12 @@ fun ImageProxy.toNv12ByteArray(cropRect: Rect, rotationDegrees: Int = 0): ByteAr
                 nv12[uvDstIndex++] = vBuffer.get(vIndex)
             }
         }
+        
+        // 绘制时间戳（如果提供）
+        if (timestamp != null) {
+            drawTimestampOnNv12(nv12, cropWidth, cropHeight, timestamp, charWidth, charHeight)
+        }
+        
         return nv12
     }
 
@@ -1287,6 +1846,11 @@ fun ImageProxy.toNv12ByteArray(cropRect: Rect, rotationDegrees: Int = 0): ByteAr
             nv12[uvDstIndex++] = rotatedUV[uvSrcIndex]      // U
             nv12[uvDstIndex++] = rotatedUV[uvSrcIndex + 1]  // V
         }
+    }
+
+    // 绘制时间戳（如果提供）
+    if (timestamp != null) {
+        drawTimestampOnNv12(nv12, alignedCropWidth, alignedCropHeight, timestamp, charWidth, charHeight)
     }
 
     return nv12
@@ -1418,7 +1982,7 @@ fun MainContent(
     ) {
         // 相机预览区域：主界面顶部的正方形 Box，内部根据宽高比进行 FIT 预览
         if (cameraPermissionGranted) {
-            BoxWithConstraints(
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f) // 固定为正方形区域
