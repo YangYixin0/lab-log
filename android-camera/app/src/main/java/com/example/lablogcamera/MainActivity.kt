@@ -84,6 +84,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -337,6 +338,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val cameraManager: CameraManager? =
         application.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
     private var cachedCapabilitiesJson: String? = null
+    // 缓存 ImageAnalysis 的实际分辨率（在首次采集时记录）
+    private var cachedImageAnalysisResolution: AndroidSize? = null
 
     val imageAnalysis = mutableStateOf<ImageAnalysis?>(null)
     private val cameraExecutor = Executors.newSingleThreadExecutor()
@@ -438,6 +441,54 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun unlockOverlayRotationOnStop() {
         _lockedOverlayRotation.value = null
+    }
+
+    /**
+     * 初始化临时 ImageAnalysis 以获取实际分辨率（在权限获取后调用）。
+     * 捕获第一帧后立即清理，不影响正常采集流程。
+     */
+    fun initializeImageAnalysisResolution(context: Context, lifecycleOwner: LifecycleOwner) {
+        if (cachedImageAnalysisResolution != null) {
+            // 已经获取过，不需要重复
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+                val cameraProvider = cameraProviderFuture.get()
+                val maxResolution = getMaxSupportedResolution()
+                
+                val tempAnalysis = ImageAnalysis.Builder()
+                    .setTargetResolution(maxResolution)
+                    .setTargetRotation(Surface.ROTATION_0)
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                
+                var frameReceived = false
+                tempAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                    if (!frameReceived) {
+                        frameReceived = true
+                        cachedImageAnalysisResolution = AndroidSize(imageProxy.width, imageProxy.height)
+                        Log.d(TAG, "Initialized ImageAnalysis resolution: ${imageProxy.width}x${imageProxy.height}")
+                        // 立即清理，避免影响正常流程
+                        tempAnalysis.clearAnalyzer()
+                        viewModelScope.launch(Dispatchers.Main) {
+                            cameraProvider.unbind(tempAnalysis)
+                        }
+                    }
+                    imageProxy.close()
+                }
+                
+                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                withContext(Dispatchers.Main) {
+                    cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, tempAnalysis)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize ImageAnalysis resolution", e)
+                // 如果失败，使用预期分辨率
+                cachedImageAnalysisResolution = getMaxSupportedResolution()
+            }
+        }
     }
 
     private fun connect() {
@@ -600,6 +651,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                 // 记录 ImageAnalysis 实际提供的分辨率（仅首次）
                                 if (!encoderStarted) {
                                     Log.d(TAG, "ImageAnalysis actual resolution: ${imageProxy.width}x${imageProxy.height} (target aspectRatio: ${aspectRatio.numerator}:${aspectRatio.denominator})")
+                                    // 缓存实际分辨率，用于后续连接时上报
+                                    cachedImageAnalysisResolution = AndroidSize(imageProxy.width, imageProxy.height)
                                 }
 
                                 val encoder = h264Encoder
@@ -786,11 +839,15 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                         .put("lensFacing", it.lensFacing)
                 )
             }
+            val imageAnalysisRes = cachedImageAnalysisResolution ?: getMaxSupportedResolution()
             val capabilitiesObj = JSONObject()
                 .put("type", "capabilities")
                 .put("deviceModel", Build.MODEL ?: "unknown")
                 .put("sdkInt", Build.VERSION.SDK_INT)
                 .put("resolutions", array)
+                .put("imageAnalysisResolution", JSONObject()
+                    .put("width", imageAnalysisRes.width)
+                    .put("height", imageAnalysisRes.height))
             capabilitiesObj.toString()
         } catch (e: SecurityException) {
             Log.e(TAG, "Unable to query camera characteristics", e)
@@ -833,10 +890,25 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * 编码器对齐裁剪：按目标宽高比居中裁剪，基准宽 1920，32/偶数对齐。
      * 无论设备横竖，都使用同一横向比例，方向由 rotationForBackend 处理。
+     * 1:1 时使用全帧（不裁剪），但做 32 对齐以避免条纹。
      */
     private fun computeSafeAlignedRect(imageProxy: ImageProxy, desiredAspect: Rational, isPortraitByPhysical: Boolean): Rect {
         val imageWidth = imageProxy.width
         val imageHeight = imageProxy.height
+        
+        // 1:1 时使用全帧，但做 32 对齐
+        val is1by1 = desiredAspect.numerator == 1 && desiredAspect.denominator == 1
+        if (is1by1) {
+            // 全帧对齐：宽高分别向下对齐到 32 的倍数且为偶数
+            var alignedWidth = (imageWidth / 32) * 32
+            var alignedHeight = (imageHeight / 32) * 32
+            if (alignedWidth < 2) alignedWidth = 2
+            if (alignedHeight < 2) alignedHeight = 2
+            if (alignedWidth % 2 != 0) alignedWidth -= 1
+            if (alignedHeight % 2 != 0) alignedHeight -= 1
+            return Rect(0, 0, alignedWidth, alignedHeight)
+        }
+        
         // 根据目标宽高比选择安全尺寸：
         // - 16:9 时，横屏 1920x1088，竖屏 1088x1920（32/偶数对齐）
         // - 其它（含 4:3）时，横屏 1920x1472，竖屏 1472x1920
@@ -984,12 +1056,21 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(modifier: Modifier = Modifier, webSocketViewModel: WebSocketViewModel = viewModel()) {
         val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
+        val context = LocalContext.current
+        val lifecycleOwner = LocalLifecycleOwner.current
 
     LaunchedEffect(Unit) {
         if (!cameraPermissionState.status.isGranted) {
                 cameraPermissionState.launchPermissionRequest()
             }
                 }
+
+    // 权限获取后立即初始化 ImageAnalysis 分辨率
+    LaunchedEffect(cameraPermissionState.status.isGranted) {
+        if (cameraPermissionState.status.isGranted) {
+            webSocketViewModel.initializeImageAnalysisResolution(context, lifecycleOwner)
+        }
+    }
 
         MainContent(
             modifier = modifier,
@@ -1087,11 +1168,16 @@ fun MainContent(
                 // 虚线框相对于重力方向始终显示为"横向"（宽大于高）
                 // 设备竖放时：使用原始宽高比（如 16:9），虚线框在屏幕上为横向
                 // 设备横放时：翻转宽高比（如 9:16），虚线框在屏幕上为竖向，但相对于重力仍为横向
+                // 1:1 时无论设备横竖都显示为正方形
                 val baseAspectRatio = (if (uiState.isStreaming) (requestedAspect ?: selectedAspectRatio) else selectedAspectRatio).let {
                     val safeDenominator = if (it.denominator == 0) 1 else it.denominator
                     Rational(it.numerator, safeDenominator)
                 }
-                val overlayAspectRatio = if (isDeviceLandscape) {
+                val is1by1 = baseAspectRatio.numerator == 1 && baseAspectRatio.denominator == 1
+                val overlayAspectRatio = if (is1by1) {
+                    // 1:1 时无论设备横竖都显示为正方形
+                    Rational(1, 1)
+                } else if (isDeviceLandscape) {
                     // 设备横放时翻转宽高比
                     Rational(baseAspectRatio.denominator, baseAspectRatio.numerator)
                 } else {
@@ -1160,7 +1246,7 @@ fun MainContent(
             fontSize = 12.sp
         )
 
-        // 宽高比选择控件（4:3 / 16:9）
+        // 宽高比选择控件（4:3 / 16:9 / 不裁剪）
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -1170,6 +1256,7 @@ fun MainContent(
 
             val is43Selected = selectedAspectRatio.numerator == 4 && selectedAspectRatio.denominator == 3
             val is169Selected = selectedAspectRatio.numerator == 16 && selectedAspectRatio.denominator == 9
+            val isNoCropSelected = selectedAspectRatio.numerator == 1 && selectedAspectRatio.denominator == 1
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -1183,6 +1270,12 @@ fun MainContent(
                     enabled = !is169Selected && !uiState.isStreaming
                 ) {
                     Text("16:9")
+                }
+                Button(
+                    onClick = { webSocketViewModel.onAspectRatioSelected(1, 1) },
+                    enabled = !isNoCropSelected && !uiState.isStreaming
+                ) {
+                    Text("不裁剪")
                 }
             }
         }
