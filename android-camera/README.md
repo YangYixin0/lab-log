@@ -108,7 +108,7 @@
       - 支持在视频帧上绘制时间戳，格式为 "Time: hh:mm:ss"（24 小时格式）；
       - 时间戳显示在视频左上角，使用白色文字配黑色背景以提高可读性；
       - 目前字体不太好看，有待修改。
-      - 支持三种模式切换（在 `WebSocketViewModel` 中配置 `timestampMode`）：
+      - 支持三种模式切换（**编译时配置**，在 `WebSocketViewModel` 中修改 `timestampMode` 变量，需要重新编译）：
         - `TIMESTAMP_MODE_NONE`：无时间戳
         - `TIMESTAMP_MODE_12x18`：使用 12×18 像素字体
         - `TIMESTAMP_MODE_16x24`：使用 16×24 像素字体（默认）
