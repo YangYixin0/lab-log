@@ -301,8 +301,8 @@ App 在关键状态变更时发送 `ClientStatus`：
    - 终端会看到类似：
 
      ```text
-     [App Status] ... {"status":"capture_started","message":"Streaming H.264 at 4:3 aspect ratio, 4MB bitrate (10fps)","rotation":90}
-     [Info]: Started recording session at recordings/... (rotation=90)
+     [App Status] ... {"status":"capture_started","message":"Streaming H.264 at 4:3 aspect ratio, 4MB bitrate (10fps) [rotated on Android]"}
+     [Info]: Started recording session at recordings/...
      [Frame]: ... seq=0 timestamp=... size=...
      ...
      ```
@@ -318,15 +318,14 @@ App 在关键状态变更时发送 `ClientStatus`：
 
      ```text
      [Info]: FPS estimate (server) frame_count=57 -> 4.81
-     [Info]: Rotating video by 90 degrees (transpose=1)
      [Info]: Thumbnail saved to recordings/<client>_<timestamp>/thumbnail.jpg
      [Info]: MP4 saved to recordings/<client>_<timestamp>/stream.mp4
      ```
 
    - 到 `backend/recordings/` 目录下即可找到对应的文件夹，包含：
      - `stream.h264`：原始 H.264 流
-     - `stream.mp4`：封装后的 MP4 视频（已根据 rotation 旋转）
-     - `thumbnail.jpg`：第一帧的缩略图（已根据 rotation 旋转）
+     - `stream.mp4`：封装后的 MP4 视频（视频已在 Android 端旋转完成，无需后端再旋转）
+     - `thumbnail.jpg`：第一帧的缩略图（视频已在 Android 端旋转完成，无需后端再旋转）
 
 ---
 
@@ -420,7 +419,7 @@ App 在关键状态变更时发送 `ClientStatus`：
    - **解决方案**：
      - 固定 `ImageAnalysis` 的 `targetRotation` 为 `Surface.ROTATION_0`
      - 停用 HAL 级旋转裁剪（注释掉 `applyRotateAndCrop`）
-     - 仅在前端做安全尺寸裁剪，旋转完全由后端 ffmpeg 处理
+     - 视频旋转在 Android 端完成，通过手动旋转 YUV 数据实现
 
 4. **色度平面顺序错误**：
    - **问题**：某些设备的 YUV_420_888 映射可能更接近 NV21（VU 顺序），而编码器期望 NV12（UV 顺序）
@@ -475,9 +474,10 @@ App 在关键状态变更时发送 `ClientStatus`：
 
 > **经验总结**：
 > - 优先使用"安全尺寸"而非精确比例，避免与编码器 stride 冲突
-> - 避免在 Android 端进行任何旋转操作，将所有旋转交给后端 ffmpeg 处理
+> - 在 Android 端旋转时，必须正确处理 stride 和对齐要求，确保旋转后的数据满足 32/偶数对齐
 > - 确保所有裁剪尺寸和坐标都满足对齐要求（32/偶数对齐）
-> - 如果遇到条纹/绿带，优先检查裁剪尺寸是否与编码器 stride 匹配
+> - 对齐后尺寸变化时，基于原始裁剪区域的中心点重新计算位置，保留原始裁剪意图
+> - 如果遇到条纹/绿带，优先检查裁剪尺寸是否与编码器对齐要求匹配（32 的倍数且为偶数）
 > - 测试时可以先使用全帧对齐（无裁剪）验证是否消除问题，再逐步缩小到目标尺寸
 
 ---
