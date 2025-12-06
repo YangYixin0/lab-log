@@ -104,8 +104,9 @@ ffmpeg -y -f h264 -r <fps> -i stream.h264 -c:v copy stream.mp4
 ```
 
 - `-f h264`：告诉 ffmpeg 输入是裸 H.264；
-- `-r <fps>`：显式指定帧率，避免 ffmpeg 从码流错误推断导致“1fps 视频”；
+- `-r <fps>`：显式指定帧率，避免 ffmpeg 从码流错误推断导致"1fps 视频"；
 - `-c:v copy`：不重编码，只做封装，速度快且无损。
+- **注意**：视频已在 Android 端旋转完成，后端无需再旋转，始终使用 `-c:v copy` 直接拷贝，速度最快。
 - 若 `ffmpeg` 返回码非 0，会打印 stderr 并返回 `None`。
 
 > 注意：需要在服务器环境安装 `ffmpeg`，并确保命令行中可直接调用。  

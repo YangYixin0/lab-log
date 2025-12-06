@@ -45,7 +45,6 @@ class RecordingSession:
         self.last_device_ts_ms: Optional[int] = None
         self.first_arrival_ms: Optional[int] = None
         self.last_arrival_ms: Optional[int] = None
-        self.rotation: int = 0  # 设备旋转角度（0, 90, 180, 270）
 
     def add_frame(self, timestamp_ms: int, arrival_ms: int, payload: bytes):
         """追加一帧 H.264 数据，并记录时间信息。"""
@@ -67,15 +66,15 @@ class RecordingSession:
         结束会话：
         - 先关闭裸码流文件
         - 通过 _determine_fps() 估算实际帧率
-        - 调用 mux_frames_to_mp4 使用 ffmpeg 做封装（可选旋转）
+        - 调用 mux_frames_to_mp4 使用 ffmpeg 做封装（视频已在 Android 端旋转完成）
         - 提取第一帧并保存为缩略图
         """
         self.close()
         fps = self._determine_fps()
-        mp4_path = mux_frames_to_mp4(self.raw_path, self.mp4_path, fps, self.rotation)
+        mp4_path = mux_frames_to_mp4(self.raw_path, self.mp4_path, fps)
         if mp4_path:
             # 提取第一帧并保存为缩略图
-            extract_first_frame(self.raw_path, self.thumbnail_path, self.rotation)
+            extract_first_frame(self.raw_path, self.thumbnail_path)
         return mp4_path
 
     def _determine_fps(self) -> float:
@@ -148,85 +147,27 @@ def parse_frame_packet(packet: bytes):
     return timestamp_ms, frame_seq, payload
 
 
-def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float, rotation: int = 0) -> Optional[Path]:
+def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float) -> Optional[Path]:
+    """
+    使用 ffmpeg 将裸 H.264 比特流封装为 MP4：
+    - 通过 -f h264 告诉 ffmpeg 输入格式
+    - 通过 -r <fps> 显式指定帧率，避免 ffmpeg 依赖不可靠的码流推断
+    - 使用 -c:v copy 直接拷贝视频轨，无重编码，速度快且无损
+    - 视频已在 Android 端旋转完成，无需后端再旋转
+    """
     if not raw_path.exists():
         print("[Warning]: Raw H.264 file not found; skip MP4 muxing.")
         return None
 
-    # 使用 ffmpeg 将裸 H.264 比特流封装为 MP4：
-    # - 通过 -f h264 告诉 ffmpeg 输入格式
-    # - 通过 -r <fps> 显式指定帧率，避免 ffmpeg 依赖不可靠的码流推断
-    # - 如果 rotation 不为 0，需要重新编码以旋转视频
-    # - 否则 -c:v copy 直接拷贝视频轨，无重编码，速度快且无损
-    
-    if rotation == 0:
-        # 不需要旋转：直接拷贝
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-r", f"{fps:.2f}",
-            "-i", str(raw_path),
-            "-c:v", "copy",
-            str(output_path),
-        ]
-    elif rotation == 90:
-        # 顺时针旋转 90 度：使用 transpose=1
-        print(f"[Info]: Rotating video by {rotation} degrees (transpose=1)")
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-r", f"{fps:.2f}",
-            "-i", str(raw_path),
-            "-vf", "transpose=1",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",
-            str(output_path),
-        ]
-    elif rotation == 180:
-        # 旋转 180 度：使用 transpose=1,transpose=1（两次 90 度旋转）
-        print(f"[Info]: Rotating video by {rotation} degrees (transpose=1,transpose=1)")
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-r", f"{fps:.2f}",
-            "-i", str(raw_path),
-            "-vf", "transpose=1,transpose=1",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",
-            str(output_path),
-        ]
-    elif rotation == 270:
-        # 逆时针旋转 90 度（或顺时针 270 度）：使用 transpose=2
-        print(f"[Info]: Rotating video by {rotation} degrees (transpose=2)")
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-r", f"{fps:.2f}",
-            "-i", str(raw_path),
-            "-vf", "transpose=2",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",
-            str(output_path),
-        ]
-    else:
-        # 未知角度，不旋转
-        print(f"[Warning]: Unknown rotation angle {rotation}, skipping rotation")
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-r", f"{fps:.2f}",
-            "-i", str(raw_path),
-            "-c:v", "copy",
-            str(output_path),
-        ]
+    cmd = [
+        os.environ.get("FFMPEG_BIN", "ffmpeg"),
+        "-y",
+        "-f", "h264",
+        "-r", f"{fps:.2f}",
+        "-i", str(raw_path),
+        "-c:v", "copy",
+        str(output_path),
+    ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -237,74 +178,24 @@ def mux_frames_to_mp4(raw_path: Path, output_path: Path, fps: float, rotation: i
     return output_path
 
 
-def extract_first_frame(raw_path: Path, output_path: Path, rotation: int = 0) -> Optional[Path]:
+def extract_first_frame(raw_path: Path, output_path: Path) -> Optional[Path]:
     """
     从 H.264 文件中提取第一帧并保存为 JPEG 图片。
-    如果 rotation 不为 0，会同时旋转图片以匹配视频的旋转。
+    视频已在 Android 端旋转完成，无需后端再旋转。
     """
     if not raw_path.exists():
         print("[Warning]: Raw H.264 file not found; skip thumbnail extraction.")
         return None
 
-    if rotation == 0:
-        # 不需要旋转：直接提取第一帧
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-i", str(raw_path),
-            "-vframes", "1",
-            "-q:v", "2",  # 高质量 JPEG (2-31, 2 是最高质量)
-            str(output_path),
-        ]
-    elif rotation == 90:
-        # 顺时针旋转 90 度：使用 transpose=1
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-i", str(raw_path),
-            "-vf", "transpose=1",
-            "-vframes", "1",
-            "-q:v", "2",
-            str(output_path),
-        ]
-    elif rotation == 180:
-        # 旋转 180 度：使用 transpose=1,transpose=1（两次 90 度旋转）
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-i", str(raw_path),
-            "-vf", "transpose=1,transpose=1",
-            "-vframes", "1",
-            "-q:v", "2",
-            str(output_path),
-        ]
-    elif rotation == 270:
-        # 逆时针旋转 90 度（或顺时针 270 度）：使用 transpose=2
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-i", str(raw_path),
-            "-vf", "transpose=2",
-            "-vframes", "1",
-            "-q:v", "2",
-            str(output_path),
-        ]
-    else:
-        # 未知角度，不旋转
-        print(f"[Warning]: Unknown rotation angle {rotation} for thumbnail, skipping rotation")
-        cmd = [
-            os.environ.get("FFMPEG_BIN", "ffmpeg"),
-            "-y",
-            "-f", "h264",
-            "-i", str(raw_path),
-            "-vframes", "1",
-            "-q:v", "2",
-            str(output_path),
-        ]
+    cmd = [
+        os.environ.get("FFMPEG_BIN", "ffmpeg"),
+        "-y",
+        "-f", "h264",
+        "-i", str(raw_path),
+        "-vframes", "1",
+        "-q:v", "2",  # 高质量 JPEG (2-31, 2 是最高质量)
+        str(output_path),
+    ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -316,13 +207,16 @@ def extract_first_frame(raw_path: Path, output_path: Path, rotation: int = 0) ->
     return output_path
 
 
-def start_recording(websocket, client_id: str, rotation: int = 0):
+def start_recording(websocket, client_id: str):
+    """
+    开始一个新的录制会话。
+    视频已在 Android 端旋转完成，无需记录 rotation。
+    """
     if websocket in RECORDING_SESSIONS:
         finalize_recording(websocket, client_id)
     session = RecordingSession(client_id)
-    session.rotation = rotation
     RECORDING_SESSIONS[websocket] = session
-    print(f"[Info]: Started recording session at {session.session_dir} (rotation={rotation})")
+    print(f"[Info]: Started recording session at {session.session_dir}")
 
 
 def finalize_recording(websocket, client_id: str):
@@ -355,8 +249,7 @@ async def consumer_handler(websocket):
                     data = json.loads(message)
                     status = data.get("status")
                     if status == "capture_started":
-                        rotation = data.get("rotation", 0)
-                        start_recording(websocket, client_id, rotation)
+                        start_recording(websocket, client_id)
                     elif status == "capture_stopped":
                         finalize_recording(websocket, client_id)
                 except (json.JSONDecodeError, TypeError):

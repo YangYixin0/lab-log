@@ -149,8 +149,7 @@ data class AspectRatio(val width: Int, val height: Int)
  */
 data class ClientStatus(
     val status: String,
-    val message: String? = null,
-    val rotation: Int? = null  // 设备旋转角度，后端可用于旋转视频
+    val message: String? = null
 )
 
 /**
@@ -212,11 +211,11 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
     }
 
     @SuppressLint("UnsafeOptInUsageError")
-    fun encode(image: ImageProxy, cropRect: Rect) {
+    fun encode(image: ImageProxy, cropRect: Rect, rotationDegrees: Int = 0) {
         val codec = mediaCodec ?: return
         try {
             // 将整帧转换和编码过程都放在 try 中，防止异常向外抛出导致 Analyzer 中断
-            val yuvBytes = image.toNv12ByteArray(cropRect)
+            val yuvBytes = image.toNv12ByteArray(cropRect, rotationDegrees)
 
             val inputBufferIndex = codec.dequeueInputBuffer(10000) // 10ms timeout
             if (inputBufferIndex >= 0) {
@@ -730,28 +729,98 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                     if (shouldSend) {
                                     val desiredAspect = requestedAspectRatio ?: Rational(4, 3)
                                     val physicalRotation = _devicePhysicalRotation.value
-                                    val isPortraitByPhysical = physicalRotation % 180 == 0
-                                    // 安全尺寸裁剪：根据选择的宽高比选择接近的安全尺寸；竖屏/横屏分别取对齐值
-                                    val cropRect = lockedCropRect ?: computeSafeAlignedRect(
-                                        imageProxy,
-                                        desiredAspect,
-                                        isPortraitByPhysical
-                                    ).also {
-                                            lockedCropRect = it
-                                            Log.d(TAG, "Locked crop rect: ${it.width()}x${it.height()}, rotation=$rotationDegrees")
+                                    val currentFacing = _selectedCameraFacing.value
+                                    // 计算需要旋转的角度（用于 Android 端旋转）
+                                    val rotationDegreesForAndroid = calculateRotationForBackend(physicalRotation, currentFacing)
+                                    
+                                    // 计算旋转后的图像尺寸
+                                    val (rotatedWidth, rotatedHeight) = getRotatedDimensions(
+                                        imageProxy.width,
+                                        imageProxy.height,
+                                        rotationDegreesForAndroid
+                                    )
+                                    
+                                    // 创建一个临时的 ImageProxy 包装器，用于计算裁剪区域
+                                    // 实际上我们需要基于旋转后的尺寸计算裁剪区域
+                                    // 由于 computeSafeAlignedRect 需要 ImageProxy，我们需要传递原始 imageProxy
+                                    // 但裁剪区域应该基于旋转后的尺寸
+                                    // 解决方案：先计算裁剪区域（基于原始尺寸），然后在 toNv12ByteArray 中处理旋转
+                                    // 但这样 cropRect 就不对了
+                                    // 更好的方案：修改 computeSafeAlignedRect 接受宽度和高度参数
+                                    // 或者创建一个包装类
+                                    
+                                    // 临时方案：如果旋转了90/270度，交换宽高来计算裁剪区域
+                                    val cropRect = lockedCropRect ?: run {
+                                        // 创建一个基于旋转后尺寸的 Rect 来计算裁剪区域
+                                        // 我们需要基于旋转后的图像尺寸来计算
+                                        val tempRect = Rect(0, 0, rotatedWidth, rotatedHeight)
+                                        // 使用 desiredAspect 计算目标尺寸
+                                        val is1by1 = desiredAspect.numerator == 1 && desiredAspect.denominator == 1
+                                        if (is1by1) {
+                                            // 全帧对齐
+                                            var alignedWidth = (rotatedWidth / 32) * 32
+                                            var alignedHeight = (rotatedHeight / 32) * 32
+                                            if (alignedWidth < 2) alignedWidth = 2
+                                            if (alignedHeight < 2) alignedHeight = 2
+                                            if (alignedWidth % 2 != 0) alignedWidth -= 1
+                                            if (alignedHeight % 2 != 0) alignedHeight -= 1
+                                            Rect(0, 0, alignedWidth, alignedHeight)
+                                        } else {
+                                            // 始终裁剪宽>高的区域
+                                            // 使用严格比例：4:3 使用 1920×1440，16:9 使用 1920×1088
+                                            val is16by9 = isAspectApprox(desiredAspect, 16, 9)
+                                            val targetW = if (is16by9) minOf(1920, rotatedWidth) else minOf(1920, rotatedWidth)
+                                            val targetH = if (is16by9) minOf(1088, rotatedHeight) else minOf(1440, rotatedHeight)
+                                            
+                                            // 确保宽>高
+                                            var cropW = maxOf(targetW, targetH).coerceAtMost(rotatedWidth)
+                                            var cropH = minOf(targetW, targetH).coerceAtMost(rotatedHeight)
+                                            
+                                            // 对于严格比例（1440 和 1088），先尝试直接使用（仅确保为偶数）
+                                            // 1440 = 32 × 45，满足 32 对齐
+                                            // 1088 = 32 × 34，满足 32 对齐
+                                            if (cropW % 2 != 0) cropW -= 1
+                                            if (cropH % 2 != 0) cropH -= 1
+                                            
+                                            // 确保最小值
+                                            if (cropW < 2) cropW = 2
+                                            if (cropH < 2) cropH = 2
+                                            
+                                            // 确保宽>高
+                                            if (cropW <= cropH) {
+                                                val temp = cropW
+                                                cropW = cropH
+                                                cropH = temp
+                                                // 确保为偶数
+                                                if (cropW % 2 != 0) cropW -= 1
+                                                if (cropH % 2 != 0) cropH -= 1
+                                                cropW = cropW.coerceAtLeast(2)
+                                                cropH = cropH.coerceAtLeast(2)
+                                            }
+                                            
+                                            val left = ((rotatedWidth - cropW) / 2).coerceAtLeast(0)
+                                            val top = ((rotatedHeight - cropH) / 2).coerceAtLeast(0)
+                                            Rect(left, top, left + cropW, top + cropH)
                                         }
-                                        val frameWidth = cropRect.width()
-                                        val frameHeight = cropRect.height()
-                                        if (!encoderStarted) {
-                                            // 以"裁剪后尺寸"初始化编码器
-                                            encoder.start(frameWidth, frameHeight, encoderBitrate, targetFps)
-                                            encoderStarted = true
-                                            val physicalRotation = _devicePhysicalRotation.value
-                                            val currentFacing = _selectedCameraFacing.value
-                                            val rotationForBackend = calculateRotationForBackend(physicalRotation, currentFacing)
-                                            Log.d(TAG, "H.264 Encoder started: ${frameWidth}x${frameHeight}, physicalRotation=$physicalRotation, cameraFacing=$currentFacing, imageRotation=$rotationDegrees, rotationForBackend=$rotationForBackend")
-                                        }
-                                        encoder.encode(imageProxy, cropRect)
+                                    }.also {
+                                        lockedCropRect = it
+                                        Log.d(TAG, "Locked crop rect: ${it.width()}x${it.height()}, rotation=$rotationDegreesForAndroid, rotatedSize=${rotatedWidth}x${rotatedHeight}")
+                                    }
+                                    
+                                    val frameWidth = cropRect.width()
+                                    val frameHeight = cropRect.height()
+                                    if (!encoderStarted) {
+                                        // 以"旋转+裁剪后尺寸"初始化编码器
+                                        encoder.start(frameWidth, frameHeight, encoderBitrate, targetFps)
+                                        encoderStarted = true
+                                        Log.d(TAG, "H.264 Encoder started: ${frameWidth}x${frameHeight}, physicalRotation=$physicalRotation, cameraFacing=$currentFacing, rotationForAndroid=$rotationDegreesForAndroid")
+                                    }
+                                    
+                                    // 调用 encode，传入旋转角度
+                                    // 需要修改 H264Encoder.encode 来接受旋转角度
+                                    // 或者直接在 encode 中调用 toNv12ByteArray 时传入旋转角度
+                                    // 让我先修改 H264Encoder.encode
+                                    encoder.encode(imageProxy, cropRect, rotationDegreesForAndroid)
                                     } else if (targetFps > 0) {
                                         droppedFrames++
                                         if (droppedFrames <= 5 || droppedFrames % targetFps == 0) {
@@ -772,14 +841,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
 
                 val fpsLabel = formatFpsLabel(requestedFps)
                 val bitrateMb = encoderBitrate / 1_000_000
-                val statusMsg = "Streaming H.264 at ${aspectRatio.numerator}:${aspectRatio.denominator} aspect ratio, ${bitrateMb}MB bitrate ($fpsLabel)"
+                val statusMsg = "Streaming H.264 at ${aspectRatio.numerator}:${aspectRatio.denominator} aspect ratio, ${bitrateMb}MB bitrate ($fpsLabel) [rotated on Android]"
                 _uiState.update { it.copy(isStreaming = true, statusMessage = statusMsg) }
-                // 发送 capture_started 状态，包含当前设备旋转角度，后端可用于旋转视频
-                // 根据摄像头类型计算正确的 rotation（使用之前声明的 currentFacing）
-                val physicalRotation = _devicePhysicalRotation.value
-                val rotationForBackend = calculateRotationForBackend(physicalRotation, currentFacing)
-                Log.d(TAG, "Sending capture_started: physicalRotation=$physicalRotation, cameraFacing=$currentFacing, rotationForBackend=$rotationForBackend")
-                sendStatus(ClientStatus("capture_started", statusMsg, rotationForBackend))
+                // 发送 capture_started 状态（视频已在 Android 端旋转完成，无需发送 rotation）
+                sendStatus(ClientStatus("capture_started", statusMsg))
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start streaming", e)
@@ -821,7 +886,6 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 val statusJson = JSONObject().apply {
                     put("status", status.status)
                     status.message?.let { put("message", it) }
-                    status.rotation?.let { put("rotation", it) }
                 }.toString()
                 webSocket?.send(statusJson)
                 Log.d(TAG, "--> Sent status: $statusJson")
@@ -939,7 +1003,14 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
      * 无论设备横竖，都使用同一横向比例，方向由 rotationForBackend 处理。
      * 1:1 时使用全帧（不裁剪），但做 32 对齐以避免条纹。
      */
-    private fun computeSafeAlignedRect(imageProxy: ImageProxy, desiredAspect: Rational, isPortraitByPhysical: Boolean): Rect {
+    /**
+     * 安全尺寸裁剪：根据选择的宽高比选择接近的安全尺寸，始终裁剪宽>高的区域。
+     * 1:1 时使用全帧（不裁剪），但做 32 对齐以避免条纹。
+     * 
+     * @param imageProxy 图像代理（可能是旋转后的图像）
+     * @param desiredAspect 目标宽高比
+     */
+    private fun computeSafeAlignedRect(imageProxy: ImageProxy, desiredAspect: Rational): Rect {
         val imageWidth = imageProxy.width
         val imageHeight = imageProxy.height
         
@@ -956,30 +1027,35 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             return Rect(0, 0, alignedWidth, alignedHeight)
         }
         
-        // 根据目标宽高比选择安全尺寸：
-        // - 16:9 时，横屏 1920x1088，竖屏 1088x1920（32/偶数对齐）
-        // - 其它（含 4:3）时，横屏 1920x1472，竖屏 1472x1920
+        // 始终裁剪宽>高的区域：
+        // - 16:9 时，裁剪 1920x1088（32/偶数对齐）
+        // - 其它（含 4:3）时，裁剪 1920x1472
         val is16by9 = isAspectApprox(desiredAspect, 16, 9)
-        val targetW = when {
-            is16by9 && !isPortraitByPhysical -> minOf(1920, imageWidth)
-            is16by9 && isPortraitByPhysical -> minOf(1088, imageWidth)
-            !is16by9 && !isPortraitByPhysical -> minOf(1920, imageWidth)
-            else -> minOf(1472, imageWidth)
-        }
-        val targetH = when {
-            is16by9 && !isPortraitByPhysical -> minOf(1088, imageHeight)
-            is16by9 && isPortraitByPhysical -> minOf(1920, imageHeight)
-            !is16by9 && !isPortraitByPhysical -> minOf(1472, imageHeight)
-            else -> minOf(1920, imageHeight)
-        }
+        val targetW = if (is16by9) minOf(1920, imageWidth) else minOf(1920, imageWidth)
+        val targetH = if (is16by9) minOf(1088, imageHeight) else minOf(1472, imageHeight)
+        
+        // 确保宽>高
+        val finalW = maxOf(targetW, targetH).coerceAtMost(imageWidth)
+        val finalH = minOf(targetW, targetH).coerceAtMost(imageHeight)
 
         // 32/偶数对齐
-        var cropW = (targetW / 32) * 32
-        var cropH = (targetH / 32) * 32
+        var cropW = (finalW / 32) * 32
+        var cropH = (finalH / 32) * 32
         if (cropW < 2) cropW = 2
         if (cropH < 2) cropH = 2
         if (cropW % 2 != 0) cropW -= 1
         if (cropH % 2 != 0) cropH -= 1
+        
+        // 确保宽>高
+        if (cropW <= cropH) {
+            // 如果宽<=高，交换宽高
+            val temp = cropW
+            cropW = cropH
+            cropH = temp
+            // 重新对齐
+            cropW = ((cropW / 32) * 32).let { if (it % 2 != 0) it - 1 else it }.coerceAtLeast(2)
+            cropH = ((cropH / 32) * 32).let { if (it % 2 != 0) it - 1 else it }.coerceAtLeast(2)
+        }
 
         val left = ((imageWidth - cropW) / 2).coerceAtLeast(0)
         val top = ((imageHeight - cropH) / 2).coerceAtLeast(0)
@@ -992,6 +1068,21 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val ratio = r.numerator.toFloat() / r.denominator.coerceAtLeast(1)
         val target = num.toFloat() / den.coerceAtLeast(1)
         return kotlin.math.abs(ratio - target) <= tol
+    }
+
+    /**
+     * 计算旋转后的图像尺寸
+     * @param width 原始宽度
+     * @param height 原始高度
+     * @param rotationDegrees 旋转角度（0, 90, 180, 270）
+     * @return Pair<宽度, 高度>
+     */
+    private fun getRotatedDimensions(width: Int, height: Int, rotationDegrees: Int): Pair<Int, Int> {
+        return when (rotationDegrees) {
+            90, 270 -> Pair(height, width)  // 宽高互换
+            0, 180 -> Pair(width, height)   // 尺寸不变
+            else -> Pair(width, height)
+        }
     }
 
     /**
@@ -1015,56 +1106,184 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
  * 布局与 COLOR_FormatYUV420SemiPlanar 对应，可显著减少绿色/紫色色块等伪影。
  *
  * 注意：
- * - 仅对传入的 cropRect 区域进行裁剪与转换，保证输出分辨率与服务器期望一致；
+ * - 如果 rotationDegrees != 0，先旋转整个图像，然后从旋转后的图像中裁剪 cropRect 区域
+ * - cropRect 是基于旋转后图像尺寸的裁剪区域
  * - 所有坐标 / 宽高都强制为偶数，以满足很多硬件编码器对 UV 对齐的要求。
+ *
+ * @param cropRect 裁剪区域（基于旋转后的图像尺寸）
+ * @param rotationDegrees 旋转角度（0, 90, 180, 270）
  */
 @SuppressLint("UnsafeOptInUsageError")
-fun ImageProxy.toNv12ByteArray(cropRect: Rect): ByteArray {
-    val safeRect = cropRect.ensureEvenBounds(width, height)
+fun ImageProxy.toNv12ByteArray(cropRect: Rect, rotationDegrees: Int = 0): ByteArray {
+    val imageWidth = width
+    val imageHeight = height
+    
+    // 如果不需要旋转，使用原有逻辑
+    if (rotationDegrees == 0) {
+        val safeRect = cropRect.ensureEvenBounds(imageWidth, imageHeight)
+        val cropWidth = safeRect.width()
+        val cropHeight = safeRect.height()
+        val ySize = cropWidth * cropHeight
+        val uvSize = ySize / 2
+        val nv12 = ByteArray(ySize + uvSize)
+
+        val yPlane = planes[0]
+        val yBuffer = yPlane.buffer.duplicate()
+        val yRowStride = yPlane.rowStride
+        var dstIndex = 0
+        for (row in safeRect.top until safeRect.bottom) {
+            val rowStart = row * yRowStride + safeRect.left
+            yBuffer.position(rowStart)
+            yBuffer.get(nv12, dstIndex, cropWidth)
+            dstIndex += cropWidth
+        }
+
+        val uPlane = planes[1]
+        val vPlane = planes[2]
+        val uBuffer = uPlane.buffer.duplicate()
+        val vBuffer = vPlane.buffer.duplicate()
+        val uRowStride = uPlane.rowStride
+        val vRowStride = vPlane.rowStride
+        val uPixelStride = uPlane.pixelStride
+        val vPixelStride = vPlane.pixelStride
+
+        val chromaLeft = safeRect.left / 2
+        val chromaTop = safeRect.top / 2
+        val chromaWidth = cropWidth / 2
+        val chromaHeight = cropHeight / 2
+
+        var uvDstIndex = ySize
+        for (row in 0 until chromaHeight) {
+            val uRowStart = (row + chromaTop) * uRowStride
+            val vRowStart = (row + chromaTop) * vRowStride
+            for (col in 0 until chromaWidth) {
+                val uIndex = uRowStart + (col + chromaLeft) * uPixelStride
+                val vIndex = vRowStart + (col + chromaLeft) * vPixelStride
+                nv12[uvDstIndex++] = uBuffer.get(uIndex)
+                nv12[uvDstIndex++] = vBuffer.get(vIndex)
+            }
+        }
+        return nv12
+    }
+    
+    // 需要旋转：先旋转整个图像，然后裁剪
+    // 计算旋转后的图像尺寸
+    val (rotatedWidth, rotatedHeight) = when (rotationDegrees) {
+        90, 270 -> Pair(imageHeight, imageWidth)  // 宽高互换
+        0, 180 -> Pair(imageWidth, imageHeight)    // 尺寸不变
+        else -> Pair(imageWidth, imageHeight)
+    }
+    
+    // 确保裁剪区域在旋转后的图像范围内
+    val safeRect = cropRect.ensureEvenBounds(rotatedWidth, rotatedHeight)
     val cropWidth = safeRect.width()
     val cropHeight = safeRect.height()
-    val ySize = cropWidth * cropHeight
+    
+    // 对齐到32且为偶数
+    val alignedCropWidth = ((cropWidth / 32) * 32).let { if (it % 2 != 0) it - 1 else it }.coerceAtLeast(2)
+    val alignedCropHeight = ((cropHeight / 32) * 32).let { if (it % 2 != 0) it - 1 else it }.coerceAtLeast(2)
+    
+    val ySize = alignedCropWidth * alignedCropHeight
     val uvSize = ySize / 2
     val nv12 = ByteArray(ySize + uvSize)
-
+    
+    // 获取源图像数据
     val yPlane = planes[0]
-    val yBuffer = yPlane.buffer.duplicate()
-    val yRowStride = yPlane.rowStride
-    var dstIndex = 0
-    for (row in safeRect.top until safeRect.bottom) {
-        val rowStart = row * yRowStride + safeRect.left
-        yBuffer.position(rowStart)
-        yBuffer.get(nv12, dstIndex, cropWidth)
-        dstIndex += cropWidth
-    }
-
-    // 部分设备 YUV_420_888 的 U/V 平面顺序与预期相反，这里交换平面以测试是否能消除条纹/绿带
     val uPlane = planes[1]
     val vPlane = planes[2]
+    val yBuffer = yPlane.buffer.duplicate()
     val uBuffer = uPlane.buffer.duplicate()
     val vBuffer = vPlane.buffer.duplicate()
+    val yRowStride = yPlane.rowStride
     val uRowStride = uPlane.rowStride
     val vRowStride = vPlane.rowStride
     val uPixelStride = uPlane.pixelStride
     val vPixelStride = vPlane.pixelStride
-
-    val chromaLeft = safeRect.left / 2
-    val chromaTop = safeRect.top / 2
-    val chromaWidth = cropWidth / 2
-    val chromaHeight = cropHeight / 2
-
-    var uvDstIndex = ySize
-    for (row in 0 until chromaHeight) {
-        val uRowStart = (row + chromaTop) * uRowStride
-        val vRowStart = (row + chromaTop) * vRowStride
-        for (col in 0 until chromaWidth) {
-            val uIndex = uRowStart + (col + chromaLeft) * uPixelStride
-            val vIndex = vRowStart + (col + chromaLeft) * vPixelStride
-            // 恢复 NV12 顺序（U 后 V），结合全帧对齐策略做对照测试
-            nv12[uvDstIndex++] = uBuffer.get(uIndex)
-            nv12[uvDstIndex++] = vBuffer.get(vIndex)
+    
+    // 创建临时缓冲区存储旋转后的完整图像
+    val rotatedYSize = rotatedWidth * rotatedHeight
+    val rotatedY = ByteArray(rotatedYSize)
+    val rotatedUVSize = rotatedYSize / 2
+    val rotatedUV = ByteArray(rotatedUVSize)
+    
+    // 旋转 Y 平面
+    for (y in 0 until imageHeight) {
+        for (x in 0 until imageWidth) {
+            val srcIndex = y * yRowStride + x
+            val srcY = yBuffer.get(srcIndex)
+            
+            val (dstX, dstY) = when (rotationDegrees) {
+                90 -> Pair(imageHeight - 1 - y, x)           // 顺时针90度
+                180 -> Pair(imageWidth - 1 - x, imageHeight - 1 - y)  // 180度
+                270 -> Pair(y, imageWidth - 1 - x)           // 逆时针90度（顺时针270度）
+                else -> Pair(x, y)
+            }
+            
+            if (dstX in 0 until rotatedWidth && dstY in 0 until rotatedHeight) {
+                val dstIndex = dstY * rotatedWidth + dstX
+                rotatedY[dstIndex] = srcY
+            }
         }
     }
+    
+    // 旋转 UV 平面（按2x2块）
+    val chromaWidth = imageWidth / 2
+    val chromaHeight = imageHeight / 2
+    val rotatedChromaWidth = rotatedWidth / 2
+    val rotatedChromaHeight = rotatedHeight / 2
+    
+    for (cy in 0 until chromaHeight) {
+        for (cx in 0 until chromaWidth) {
+            val uIndex = cy * uRowStride + cx * uPixelStride
+            val vIndex = cy * vRowStride + cx * vPixelStride
+            val u = uBuffer.get(uIndex)
+            val v = vBuffer.get(vIndex)
+            
+            val (dstCX, dstCY) = when (rotationDegrees) {
+                90 -> Pair(chromaHeight - 1 - cy, cx)
+                180 -> Pair(chromaWidth - 1 - cx, chromaHeight - 1 - cy)
+                270 -> Pair(cy, chromaWidth - 1 - cx)
+                else -> Pair(cx, cy)
+            }
+            
+            if (dstCX in 0 until rotatedChromaWidth && dstCY in 0 until rotatedChromaHeight) {
+                val dstUVIndex = dstCY * rotatedChromaWidth + dstCX
+                rotatedUV[dstUVIndex * 2] = u
+                rotatedUV[dstUVIndex * 2 + 1] = v
+            }
+        }
+    }
+    
+    // 从旋转后的图像中裁剪指定区域
+    val cropLeft = safeRect.left
+    val cropTop = safeRect.top
+    
+    // 裁剪 Y 平面
+    var dstIndex = 0
+    for (row in 0 until alignedCropHeight) {
+        val srcRow = cropTop + row
+        val srcIndex = srcRow * rotatedWidth + cropLeft
+        System.arraycopy(rotatedY, srcIndex, nv12, dstIndex, alignedCropWidth)
+        dstIndex += alignedCropWidth
+    }
+    
+    // 裁剪 UV 平面
+    val cropChromaLeft = cropLeft / 2
+    val cropChromaTop = cropTop / 2
+    val cropChromaWidth = alignedCropWidth / 2
+    val cropChromaHeight = alignedCropHeight / 2
+    
+    var uvDstIndex = ySize
+    for (row in 0 until cropChromaHeight) {
+        val srcRow = cropChromaTop + row
+        for (col in 0 until cropChromaWidth) {
+            val srcCol = cropChromaLeft + col
+            val uvSrcIndex = (srcRow * rotatedChromaWidth + srcCol) * 2
+            nv12[uvDstIndex++] = rotatedUV[uvSrcIndex]      // U
+            nv12[uvDstIndex++] = rotatedUV[uvSrcIndex + 1]  // V
+        }
+    }
+    
     return nv12
 }
 
