@@ -300,6 +300,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val _selectedAspectRatio = MutableStateFlow(Rational(4, 3))
     val selectedAspectRatio: StateFlow<Rational> = _selectedAspectRatio.asStateFlow()
 
+    /**
+     * 当前 UI 选择的摄像头（默认后置）。
+     */
+    private val _selectedCameraFacing = MutableStateFlow(CameraCharacteristics.LENS_FACING_BACK)
+    val selectedCameraFacing: StateFlow<Int> = _selectedCameraFacing.asStateFlow()
+
     // 最近一帧的旋转角度（来自 ImageProxy.imageInfo.rotationDegrees），用于 UI 虚线框方向判断
     private val _lastRotationDegrees = MutableStateFlow(0)
     val lastRotationDegrees: StateFlow<Int> = _lastRotationDegrees.asStateFlow()
@@ -338,8 +344,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private val cameraManager: CameraManager? =
         application.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
     private var cachedCapabilitiesJson: String? = null
-    // 缓存 ImageAnalysis 的实际分辨率（在首次采集时记录）
-    private var cachedImageAnalysisResolution: AndroidSize? = null
+    // 缓存 ImageAnalysis 的实际分辨率（按摄像头分别缓存，在首次采集时记录）
+    private var cachedImageAnalysisResolution: MutableMap<Int, AndroidSize> = mutableMapOf()
 
     val imageAnalysis = mutableStateOf<ImageAnalysis?>(null)
     private val cameraExecutor = Executors.newSingleThreadExecutor()
@@ -359,7 +365,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * 当用户在主界面切换宽高比选项（4:3 / 16:9）时调用。
+     * 当用户在主界面切换宽高比选项（4:3 / 16:9 / 不裁剪）时调用。
      */
     fun onAspectRatioSelected(width: Int, height: Int) {
         val safeWidth = width.coerceAtLeast(1)
@@ -368,10 +374,21 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
+     * 当用户在主界面切换摄像头选项（后置/前置）时调用。
+     */
+    fun onCameraFacingSelected(facing: Int) {
+        if (facing != CameraCharacteristics.LENS_FACING_BACK && 
+            facing != CameraCharacteristics.LENS_FACING_FRONT) {
+            return
+        }
+        _selectedCameraFacing.value = facing
+    }
+
+    /**
      * 获取硬件支持的最高分辨率（用于 ImageAnalysis）。
      * 尝试使用硬件支持的最高分辨率，以获得更大的 FOV。
      */
-    private fun getMaxSupportedResolution(): AndroidSize {
+    private fun getMaxSupportedResolution(facing: Int = CameraCharacteristics.LENS_FACING_BACK): AndroidSize {
         val manager = cameraManager ?: return AndroidSize(1920, 1920) // 默认回退
         return try {
             var maxSize = AndroidSize(1920, 1920) // 默认值
@@ -380,8 +397,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             manager.cameraIdList?.forEach { cameraId ->
                 val characteristics = manager.getCameraCharacteristics(cameraId)
                 val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
-                // 只查询后置摄像头
-                if (lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
+                // 查询指定方向的摄像头
+                if (lensFacing == facing) {
                     val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                     val sizes = streamMap?.getOutputSizes(ImageFormat.YUV_420_888) ?: emptyArray()
                     sizes.forEach { size ->
@@ -394,10 +411,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
 
-            Log.d(TAG, "Max supported resolution for ImageAnalysis: ${maxSize.width}x${maxSize.height}")
+            Log.d(TAG, "Max supported resolution for ImageAnalysis (facing=$facing): ${maxSize.width}x${maxSize.height}")
             maxSize
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get max supported resolution", e)
+            Log.e(TAG, "Failed to get max supported resolution for facing=$facing", e)
             AndroidSize(1920, 1920) // 默认回退
         }
     }
@@ -444,19 +461,41 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * 初始化临时 ImageAnalysis 以获取实际分辨率（在权限获取后调用）。
+     * 根据设备物理旋转和摄像头类型计算后端需要的 rotation 值。
+     * - 后置摄像头：rotationForBackend = (physicalRotation + 90) % 360
+     * - 前置摄像头：
+     *   - 竖放（0°）或倒放（180°）：rotationForBackend = (physicalRotation + 90 + 180) % 360
+     *   - 左横（270°）或右横（90°）：rotationForBackend = (physicalRotation + 90) % 360
+     */
+    private fun calculateRotationForBackend(physicalRotation: Int, cameraFacing: Int): Int {
+        return when (cameraFacing) {
+            CameraCharacteristics.LENS_FACING_FRONT -> {
+                // 前置摄像头：竖放或倒放时需要额外加180°，横放时不需要
+                if (physicalRotation == 0 || physicalRotation == 180) {
+                    (physicalRotation + 90 + 180) % 360
+                } else {
+                    (physicalRotation + 90) % 360
+                }
+            }
+            else -> (physicalRotation + 90) % 360
+        }
+    }
+
+    /**
+     * 初始化临时 ImageAnalysis 以获取实际分辨率（在权限获取后或切换摄像头后调用）。
      * 捕获第一帧后立即清理，不影响正常采集流程。
      */
     fun initializeImageAnalysisResolution(context: Context, lifecycleOwner: LifecycleOwner) {
-        if (cachedImageAnalysisResolution != null) {
-            // 已经获取过，不需要重复
+        val facing = _selectedCameraFacing.value
+        if (cachedImageAnalysisResolution.containsKey(facing)) {
+            // 该摄像头已经获取过，不需要重复
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
                 val cameraProvider = cameraProviderFuture.get()
-                val maxResolution = getMaxSupportedResolution()
+                val maxResolution = getMaxSupportedResolution(facing)
                 
                 val tempAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(maxResolution)
@@ -468,8 +507,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 tempAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                     if (!frameReceived) {
                         frameReceived = true
-                        cachedImageAnalysisResolution = AndroidSize(imageProxy.width, imageProxy.height)
-                        Log.d(TAG, "Initialized ImageAnalysis resolution: ${imageProxy.width}x${imageProxy.height}")
+                        cachedImageAnalysisResolution[facing] = AndroidSize(imageProxy.width, imageProxy.height)
+                        Log.d(TAG, "Initialized ImageAnalysis resolution for facing=$facing: ${imageProxy.width}x${imageProxy.height}")
                         // 立即清理，避免影响正常流程
                         tempAnalysis.clearAnalyzer()
                         viewModelScope.launch(Dispatchers.Main) {
@@ -479,14 +518,17 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     imageProxy.close()
                 }
                 
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                val cameraSelector = when (facing) {
+                    CameraCharacteristics.LENS_FACING_FRONT -> CameraSelector.DEFAULT_FRONT_CAMERA
+                    else -> CameraSelector.DEFAULT_BACK_CAMERA
+                }
                 withContext(Dispatchers.Main) {
                     cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, tempAnalysis)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to initialize ImageAnalysis resolution", e)
+                Log.e(TAG, "Failed to initialize ImageAnalysis resolution for facing=$facing", e)
                 // 如果失败，使用预期分辨率
-                cachedImageAnalysisResolution = getMaxSupportedResolution()
+                cachedImageAnalysisResolution[facing] = getMaxSupportedResolution(facing)
             }
         }
     }
@@ -629,10 +671,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 // 这样可以保证：
                 // - ImageAnalysis 始终以设备允许的最高分辨率工作（FOV 最大）；
                 // - 服务器看到的编码分辨率严格按命令宽高比（例如 4:3 时得到 1920x1440，而不是 640x480）。
-                val maxResolution = getMaxSupportedResolution()
+                val currentFacing = _selectedCameraFacing.value
+                val maxResolution = getMaxSupportedResolution(currentFacing)
                 Log.d(
                     TAG,
-                    "ImageAnalysis targetResolution (max): ${maxResolution.width}x${maxResolution.height}, requestedAspectRatio=${aspectRatio.numerator}:${aspectRatio.denominator}"
+                    "ImageAnalysis targetResolution (max, facing=$currentFacing): ${maxResolution.width}x${maxResolution.height}, requestedAspectRatio=${aspectRatio.numerator}:${aspectRatio.denominator}"
                 )
 
                 val analysisBuilder = ImageAnalysis.Builder()
@@ -650,9 +693,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                             try {
                                 // 记录 ImageAnalysis 实际提供的分辨率（仅首次）
                                 if (!encoderStarted) {
-                                    Log.d(TAG, "ImageAnalysis actual resolution: ${imageProxy.width}x${imageProxy.height} (target aspectRatio: ${aspectRatio.numerator}:${aspectRatio.denominator})")
+                                    val currentFacing = _selectedCameraFacing.value
+                                    Log.d(TAG, "ImageAnalysis actual resolution (facing=$currentFacing): ${imageProxy.width}x${imageProxy.height} (target aspectRatio: ${aspectRatio.numerator}:${aspectRatio.denominator})")
                                     // 缓存实际分辨率，用于后续连接时上报
-                                    cachedImageAnalysisResolution = AndroidSize(imageProxy.width, imageProxy.height)
+                                    cachedImageAnalysisResolution[currentFacing] = AndroidSize(imageProxy.width, imageProxy.height)
                                 }
 
                                 val encoder = h264Encoder
@@ -703,8 +747,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                             encoder.start(frameWidth, frameHeight, encoderBitrate, targetFps)
                                             encoderStarted = true
                                             val physicalRotation = _devicePhysicalRotation.value
-                                            val rotationForBackend = (physicalRotation + 90) % 360
-                                            Log.d(TAG, "H.264 Encoder started: ${frameWidth}x${frameHeight}, physicalRotation=$physicalRotation, imageRotation=$rotationDegrees, rotationForBackend=$rotationForBackend")
+                                            val currentFacing = _selectedCameraFacing.value
+                                            val rotationForBackend = calculateRotationForBackend(physicalRotation, currentFacing)
+                                            Log.d(TAG, "H.264 Encoder started: ${frameWidth}x${frameHeight}, physicalRotation=$physicalRotation, cameraFacing=$currentFacing, imageRotation=$rotationDegrees, rotationForBackend=$rotationForBackend")
                                         }
                                         encoder.encode(imageProxy, cropRect)
                                     } else if (targetFps > 0) {
@@ -730,10 +775,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 val statusMsg = "Streaming H.264 at ${aspectRatio.numerator}:${aspectRatio.denominator} aspect ratio, ${bitrateMb}MB bitrate ($fpsLabel)"
                 _uiState.update { it.copy(isStreaming = true, statusMessage = statusMsg) }
                 // 发送 capture_started 状态，包含当前设备旋转角度，后端可用于旋转视频
-                // 使用设备物理旋转计算正确的 rotation：rotationForBackend = (physicalRotation + 90) % 360
+                // 根据摄像头类型计算正确的 rotation（使用之前声明的 currentFacing）
                 val physicalRotation = _devicePhysicalRotation.value
-                val rotationForBackend = (physicalRotation + 90) % 360
-                Log.d(TAG, "Sending capture_started: physicalRotation=$physicalRotation, rotationForBackend=$rotationForBackend")
+                val rotationForBackend = calculateRotationForBackend(physicalRotation, currentFacing)
+                Log.d(TAG, "Sending capture_started: physicalRotation=$physicalRotation, cameraFacing=$currentFacing, rotationForBackend=$rotationForBackend")
                 sendStatus(ClientStatus("capture_started", statusMsg, rotationForBackend))
 
             } catch (e: Exception) {
@@ -839,7 +884,9 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                         .put("lensFacing", it.lensFacing)
                 )
             }
-            val imageAnalysisRes = cachedImageAnalysisResolution ?: getMaxSupportedResolution()
+            val currentFacing = _selectedCameraFacing.value
+            val imageAnalysisRes = cachedImageAnalysisResolution[currentFacing] 
+                ?: getMaxSupportedResolution(currentFacing)
             val capabilitiesObj = JSONObject()
                 .put("type", "capabilities")
                 .put("deviceModel", Build.MODEL ?: "unknown")
@@ -1072,6 +1119,14 @@ fun MainScreen(modifier: Modifier = Modifier, webSocketViewModel: WebSocketViewM
         }
     }
 
+    // 监听摄像头选择变化，切换时重新初始化分辨率
+    val selectedCameraFacing by webSocketViewModel.selectedCameraFacing.collectAsState()
+    LaunchedEffect(selectedCameraFacing) {
+        if (cameraPermissionState.status.isGranted) {
+            webSocketViewModel.initializeImageAnalysisResolution(context, lifecycleOwner)
+        }
+    }
+
         MainContent(
             modifier = modifier,
         webSocketViewModel = webSocketViewModel,
@@ -1246,6 +1301,34 @@ fun MainContent(
             fontSize = 12.sp
         )
 
+        // 摄像头选择控件（后置 / 前置）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(text = "摄像头：")
+
+            val selectedCameraFacing by webSocketViewModel.selectedCameraFacing.collectAsState()
+            val isBackSelected = selectedCameraFacing == CameraCharacteristics.LENS_FACING_BACK
+            val isFrontSelected = selectedCameraFacing == CameraCharacteristics.LENS_FACING_FRONT
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { webSocketViewModel.onCameraFacingSelected(CameraCharacteristics.LENS_FACING_BACK) },
+                    enabled = !isBackSelected && !uiState.isStreaming
+                ) {
+                    Text("后置")
+                }
+                Button(
+                    onClick = { webSocketViewModel.onCameraFacingSelected(CameraCharacteristics.LENS_FACING_FRONT) },
+                    enabled = !isFrontSelected && !uiState.isStreaming
+                ) {
+                    Text("前置")
+                }
+            }
+        }
+
         // 宽高比选择控件（4:3 / 16:9 / 不裁剪）
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1328,6 +1411,7 @@ fun CameraPreview(
     val requestedAspectRatio = viewModel.requestedAspectRatio
     val requestedWidth = viewModel.requestedWidth
     val requestedHeight = viewModel.requestedHeight
+    val selectedCameraFacing by viewModel.selectedCameraFacing.collectAsState()
 
     // 当宽高比变化时通知父组件更新预览区域宽高比
     LaunchedEffect(requestedAspectRatio) {
@@ -1344,13 +1428,16 @@ fun CameraPreview(
             }
     }
 
-    // 当 imageAnalysis 或宽高比变化时，重新绑定相机
-    LaunchedEffect(imageAnalysis, requestedAspectRatio) {
+    // 当 imageAnalysis、宽高比或摄像头选择变化时，重新绑定相机
+    LaunchedEffect(imageAnalysis, requestedAspectRatio, selectedCameraFacing) {
         try {
             val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
                 val cameraProvider = cameraProviderFuture.get()
                     cameraProvider.unbindAll()
-                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                    val cameraSelector = when (selectedCameraFacing) {
+                        CameraCharacteristics.LENS_FACING_FRONT -> CameraSelector.DEFAULT_FRONT_CAMERA
+                        else -> CameraSelector.DEFAULT_BACK_CAMERA
+                    }
 
             // 获取显示旋转，确保 Preview 和 ImageAnalysis 使用相同的旋转
             val displayRotation = previewView.display.rotation
