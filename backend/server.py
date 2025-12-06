@@ -357,13 +357,6 @@ async def consumer_handler(websocket):
                     if status == "capture_started":
                         rotation = data.get("rotation", 0)
                         start_recording(websocket, client_id, rotation)
-                    elif status == "rotation_info":
-                        # 从第一帧获取的真实旋转角度，更新 recording session
-                        rotation = data.get("rotation", 0)
-                        session = RECORDING_SESSIONS.get(websocket)
-                        if session:
-                            session.rotation = rotation
-                            print(f"[Info]: Updated rotation to {rotation} for {client_id}")
                     elif status == "capture_stopped":
                         finalize_recording(websocket, client_id)
                 except (json.JSONDecodeError, TypeError):
