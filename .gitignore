@@ -5,7 +5,6 @@ Thumbs.db
 # 编辑器配置
 .vscode/
 .idea/
-.qoder/
 *.swp
 *.swo
 *~
