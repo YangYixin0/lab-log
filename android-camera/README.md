@@ -91,12 +91,22 @@
       - 停止并释放编码器，重置 FPS 控制状态；
       - 向服务器发送 `ClientStatus("capture_stopped", ...)`。
   - **图像处理辅助**
+    - **OCR-B 字体渲染器 `OcrBFontRenderer`**（新增）
+      - 负责从 TrueType 字体文件加载字体并渲染字符位图；
+      - 在应用启动时预加载所有时间戳所需的字符（数字 0-9、冒号、空格、T/i/m/e）；
+      - 使用 Android Canvas + Paint 实现高质量抗锯齿渲染；
+      - 字体加载失败时自动回退到系统等宽字体（`Typeface.MONOSPACE`）；
+      - 关键方法：
+        - `initialize(context: Context)`：初始化字体
+        - `preloadAllCharacters(width: Int, height: Int)`：预加载所有字符
+        - `getCachedCharBitmap(char: Char)`：获取缓存的字符位图
+        - `isPreloadCompleted()`：检查预加载是否完成
     - `ImageProxy.toNv12ByteArray(cropRect: Rect, rotationDegrees: Int, timestamp: String?, charWidth: Int, charHeight: Int)`：
       - 仅对 `cropRect` 区域做 YUV_420_888 → NV12 转换；
       - 支持旋转（0、90、180、270 度）：先旋转整个图像，然后从旋转后的图像中裁剪指定区域；
       - Y 分量逐行复制，UV 分量按 2×2 block 采样，写成交错的 UV；
       - 强制宽高为偶数，避免硬件编码对齐问题；
-      - 如果提供了 `timestamp`，会在 Y 平面上绘制时间戳水印（白色文字配黑色背景，左上角显示）。
+      - 如果提供了 `timestamp`，会在 Y 平面上绘制 OCR-B 字体时间戳水印（白色文字配黑色背景，左上角显示）。
     - `computeCropRect(imageProxy: ImageProxy)`：
       - **注意**：由于使用了 ViewPort + UseCaseGroup，`imageProxy.cropRect` 已经对应统一后的取景窗口（与预览 FOV 一致）；
       - 此函数以 `imageProxy.cropRect` 为基础，仅做偶数对齐和越界保护，不再额外改变 FOV；
@@ -107,11 +117,12 @@
     - **时间戳水印功能**：
       - 支持在视频帧上绘制时间戳，格式为 "Time: hh:mm:ss"（24 小时格式）；
       - 时间戳显示在视频左上角，使用白色文字配黑色背景以提高可读性；
-      - 目前字体不太好看，有待修改。
-      - 支持三种模式切换（**编译时配置**，在 `WebSocketViewModel` 中修改 `timestampMode` 变量，需要重新编译）：
+      - 使用 OCR-B 字体（ISO 1073/2 标准），专为光学字符识别设计，确保视觉大模型高识别准确率；
+      - 支持多种模式切换（**编译时配置**，在 `WebSocketViewModel` 中修改 `timestampMode` 变量，需要重新编译）：
         - `TIMESTAMP_MODE_NONE`：无时间戳
-        - `TIMESTAMP_MODE_12x18`：使用 12×18 像素字体
-        - `TIMESTAMP_MODE_16x24`：使用 16×24 像素字体（默认）
+        - `TIMESTAMP_MODE_OCRB_16x24`：使用 OCR-B 16×24 像素字体
+        - `TIMESTAMP_MODE_OCRB_20x30`：使用 OCR-B 20×30 像素字体（默认）
+      - 字符位图在应用启动时预加载（后台线程），运行时零渲染开销；
       - 时间戳每秒更新一次，使用缓存机制减少字符串格式化开销。
 
 - 其他关键文件
