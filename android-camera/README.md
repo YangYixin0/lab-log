@@ -353,6 +353,33 @@ App 在关键状态变更时发送 `ClientStatus`：
 
 ## 开发经验与注意事项
 
+### 旧设备安装问题（INSTALL_FAILED_TEST_ONLY）
+
+在某些旧设备（如 Android 8.1 设备）上，通过 Android Studio 的 Run 按钮直接安装可能会遇到 `INSTALL_FAILED_TEST_ONLY` 错误。
+
+**问题原因**：
+- Android Studio 的 Run 默认使用 `intermediates` 目录的中间 APK，可能被标记为 testOnly
+- 旧版本的 Android 系统对 test-only APK 的安装限制更严格
+
+**解决方案**：
+使用自定义 Run 配置，在安装前执行 `assembleDebug` 任务生成最终的 APK：
+1. Run → Edit Configurations...
+2. 创建新配置
+3. Name: "Install from Outputs"，Module: 选择你的 app 模块
+3. 在 "Before launch" 中添加：
+   - 点击 "+" → Run Gradle Task
+   - Gradle project: 选择 `android-camera:app` 模块
+   - Tasks: `assembleDebug`
+4. 保存并使用此配置运行
+
+这样会确保安装使用的是 `outputs` 目录的最终 APK，而不是 `intermediates` 目录的中间 APK，从而避免 testOnly 标志问题。
+
+**替代方案**：
+也可以使用 `Build → Build Bundle(s) / APK(s) → Build APK(s)` 构建后，手动通过 adb 安装：
+```bash
+adb install app\build\outputs\apk\debug\app-debug.apk
+```
+
 ### 视频旋转（Rotation）处理
 
 #### 如何正确获取 rotation 值
