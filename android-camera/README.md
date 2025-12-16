@@ -126,7 +126,7 @@
       - 时间戳每秒更新一次，使用缓存机制减少字符串格式化开销。
 
 - 其他关键文件
-  - `app/src/main/res/xml/network_security_config.xml`：开发环境下允许访问指定明文 HTTP/WebSocket 域名。
+  - `app/src/main/res/xml/network_security_config.xml`：开发环境下允许访问指定明文 HTTP/WebSocket 域名。**重要**：如果更换开发服务器（尤其是更换服务器域名），需要在编译前修改此文件中的域名配置，否则应用将无法连接到新的服务器。详见下方"开发经验与注意事项"章节。
   - `app/src/main/AndroidManifest.xml`：权限声明（相机、网络）及网络安全配置引用。
   - `app/build.gradle.kts`：模块依赖定义（CameraX、Compose、OkHttp 等）。
 
@@ -353,9 +353,38 @@ App 在关键状态变更时发送 `ClientStatus`：
 
 ## 开发经验与注意事项
 
+### 网络安全配置（network_security_config.xml）
+
+**重要提醒**：本应用在开发阶段使用明文 WebSocket（`ws://`）连接，因为使用`wss://`需要使用证书，而证书的申请和安装比较麻烦。而使用明文 WebSocket需要在 `app/src/main/res/xml/network_security_config.xml` 中配置允许访问的域名，因为Android 9+ 默认禁止明文流量。
+
+#### 配置文件位置
+- `app/src/main/res/xml/network_security_config.xml`
+
+#### 更换开发服务器时的操作步骤
+
+**如果更换开发服务器（尤其是更换服务器域名），必须在编译前修改此配置文件**：
+
+1. **打开配置文件**：
+   - 路径：`app/src/main/res/xml/network_security_config.xml`
+
+2. **修改域名**：
+   - 将 `<domain>` 标签中的域名替换为新的服务器域名
+   - 例如，如果新服务器域名为 `new-server.example.com`，则修改为：
+     ```xml
+     <domain includeSubdomains="true">new-server.example.com</domain>
+     ```
+
+3. **重新编译**：
+   - 修改后需要重新编译应用（`Build > Rebuild Project`）
+   - 如果只修改了资源文件，也可以直接运行，Android Studio 会自动重新打包
+
+#### 生产环境建议
+
+生产环境应改用 `wss://`（WebSocket Secure），然后可以移除 `network_security_config.xml` 文件和`android:networkSecurityConfig` 引用。
+
 ### 旧设备安装问题（INSTALL_FAILED_TEST_ONLY）
 
-在某些旧设备（如 Android 8.1 设备）上，通过 Android Studio 的 Run 按钮直接安装可能会遇到 `INSTALL_FAILED_TEST_ONLY` 错误。
+在某些旧设备（如 Android 8.1 设备）上，通过 Android Studio 的 Run 按钮直接安装可能会遇到 `INSTALL_FAILED_TEST_ONLY` 错误。不过，这个问题大概仅限于调试阶段，正式发布的APK在安装时大概不会遇到。
 
 **问题原因**：
 - Android Studio 的 Run 默认使用 `intermediates` 目录的中间 APK，可能被标记为 testOnly
@@ -375,7 +404,7 @@ App 在关键状态变更时发送 `ClientStatus`：
 这样会确保安装使用的是 `outputs` 目录的最终 APK，而不是 `intermediates` 目录的中间 APK，从而避免 testOnly 标志问题。
 
 **替代方案**：
-也可以使用 `Build → Build Bundle(s) / APK(s) → Build APK(s)` 构建后，手动通过 adb 安装：
+也可以使用 `Build → Generate App Bundles or APKs → Generate APKs` 构建后，手动通过 adb 安装：
 ```bash
 adb install app\build\outputs\apk\debug\app-debug.apk
 ```
