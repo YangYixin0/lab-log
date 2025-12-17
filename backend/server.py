@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 import os
@@ -423,17 +424,22 @@ async def terminal_input_handler():
 
 
 # The main function to start the server and the terminal handler
-async def main():
-    server_task = websockets.serve(connection_handler, "0.0.0.0", 50001)
+async def main(host: str = "0.0.0.0", port: int = 50001):
+    server_task = websockets.serve(connection_handler, host, port)
     async with server_task:
-        print("WebSocket server started at ws://0.0.0.0:50001")
+        print(f"WebSocket server started at ws://{host}:{port}")
         print("You can now connect your Android Camera App.")
         terminal_task = asyncio.create_task(terminal_input_handler())
         await asyncio.gather(terminal_task)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=50001)
+    args = parser.parse_args()
+
     try:
-        asyncio.run(main())
+        asyncio.run(main(args.host, args.port))
     except KeyboardInterrupt:
         print("\nServer shutting down.")

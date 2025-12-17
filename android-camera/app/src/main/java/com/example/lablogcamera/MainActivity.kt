@@ -1082,59 +1082,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                         // 或者创建一个包装类
 
                                         // 临时方案：如果旋转了90/270度，交换宽高来计算裁剪区域
-                                        val cropRect = lockedCropRect ?: run {
-                                            // 创建一个基于旋转后尺寸的 Rect 来计算裁剪区域
-                                            // 我们需要基于旋转后的图像尺寸来计算
-                                            val tempRect = Rect(0, 0, rotatedWidth, rotatedHeight)
-                                            // 使用 desiredAspect 计算目标尺寸
-                                            val is1by1 = desiredAspect.numerator == 1 && desiredAspect.denominator == 1
-                                            if (is1by1) {
-                                                // 全帧对齐
-                                                var alignedWidth = (rotatedWidth / 32) * 32
-                                                var alignedHeight = (rotatedHeight / 32) * 32
-                                                if (alignedWidth < 2) alignedWidth = 2
-                                                if (alignedHeight < 2) alignedHeight = 2
-                                                if (alignedWidth % 2 != 0) alignedWidth -= 1
-                                                if (alignedHeight % 2 != 0) alignedHeight -= 1
-                                                Rect(0, 0, alignedWidth, alignedHeight)
-                                            } else {
-                                                // 始终裁剪宽>高的区域
-                                                // 使用严格比例：4:3 使用 1920×1440，16:9 使用 1920×1088
-                                                val is16by9 = isAspectApprox(desiredAspect, 16, 9)
-                                                val targetW = if (is16by9) minOf(1920, rotatedWidth) else minOf(1920, rotatedWidth)
-                                                val targetH = if (is16by9) minOf(1088, rotatedHeight) else minOf(1440, rotatedHeight)
-
-                                                // 确保宽>高
-                                                var cropW = maxOf(targetW, targetH).coerceAtMost(rotatedWidth)
-                                                var cropH = minOf(targetW, targetH).coerceAtMost(rotatedHeight)
-
-                                                // 对于严格比例（1440 和 1088），先尝试直接使用（仅确保为偶数）
-                                                // 1440 = 32 × 45，满足 32 对齐
-                                                // 1088 = 32 × 34，满足 32 对齐
-                                                if (cropW % 2 != 0) cropW -= 1
-                                                if (cropH % 2 != 0) cropH -= 1
-
-                                                // 确保最小值
-                                                if (cropW < 2) cropW = 2
-                                                if (cropH < 2) cropH = 2
-
-                                                // 确保宽>高
-                                                if (cropW <= cropH) {
-                                                    val temp = cropW
-                                                    cropW = cropH
-                                                    cropH = temp
-                                                    // 确保为偶数
-                                                    if (cropW % 2 != 0) cropW -= 1
-                                                    if (cropH % 2 != 0) cropH -= 1
-                                                    cropW = cropW.coerceAtLeast(2)
-                                                    cropH = cropH.coerceAtLeast(2)
-                                                }
-
-                                                val left = ((rotatedWidth - cropW) / 2).coerceAtLeast(0)
-                                                val top = ((rotatedHeight - cropH) / 2).coerceAtLeast(0)
-                                                Rect(left, top, left + cropW, top + cropH)
-                                            }
-                                        }.also {
+                                        val cropRect = lockedCropRect ?: computeAlignedCropRectForRotatedFrame(
+                                            rotatedWidth,
+                                            rotatedHeight,
+                                            desiredAspect
+                                        ).also {
                                             lockedCropRect = it
                                             Log.d(TAG, "Locked crop rect: ${it.width()}x${it.height()}, rotation=$rotationDegreesForAndroid, rotatedSize=${rotatedWidth}x${rotatedHeight}")
                                         }
@@ -1407,6 +1359,62 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val top = ((imageHeight - cropH) / 2).coerceAtLeast(0)
         val right = (left + cropW).coerceAtMost(imageWidth)
         val bottom = (top + cropH).coerceAtMost(imageHeight)
+        return Rect(left, top, right, bottom)
+    }
+
+    /**
+     * 基于旋转后的尺寸计算裁剪区域，保持目标宽高比并做 32/偶数对齐。
+     * - 输入为“旋转后的”宽高（rotationDegreesForAndroid 已经决定了最终方向）
+     * - 优先使用可用的最大宽度/高度，按比例回退，避免被强制成 1:1
+     */
+    private fun computeAlignedCropRectForRotatedFrame(
+        rotatedWidth: Int,
+        rotatedHeight: Int,
+        desiredAspect: Rational
+    ): Rect {
+        val safeNum = desiredAspect.numerator.coerceAtLeast(1)
+        val safeDen = desiredAspect.denominator.coerceAtLeast(1)
+        val aspect = safeNum.toDouble() / safeDen.toDouble()
+
+        val maxW = (rotatedWidth / 2) * 2
+        val maxH = (rotatedHeight / 2) * 2
+
+        fun alignEven32(value: Int): Int {
+            var res = (value / 32) * 32
+            if (res < 2) res = 2
+            if (res % 2 != 0) res -= 1
+            return res
+        }
+
+        // 先按比例取最大可用尺寸，再做 32/偶数对齐
+        var cropW = maxW
+        var cropH = (cropW / aspect).toInt()
+        if (cropH > maxH) {
+            cropH = maxH
+            cropW = (cropH * aspect).toInt()
+        }
+
+        cropW = alignEven32(cropW)
+        cropH = alignEven32(cropH)
+
+        // 对齐后如仍越界，回退到可用最大值
+        if (cropW > maxW) cropW = alignEven32(maxW)
+        if (cropH > maxH) cropH = alignEven32(maxH)
+
+        // 目标为横屏比例时，确保宽 > 高；如不满足，再次按比例回退
+        if (aspect > 1.0 && cropW <= cropH) {
+            cropW = alignEven32(maxW)
+            cropH = alignEven32((cropW / aspect).toInt())
+            if (cropH > maxH) {
+                cropH = alignEven32(maxH)
+                cropW = alignEven32((cropH * aspect).toInt())
+            }
+        }
+
+        val left = ((rotatedWidth - cropW) / 2).coerceAtLeast(0)
+        val top = ((rotatedHeight - cropH) / 2).coerceAtLeast(0)
+        val right = (left + cropW).coerceAtMost(rotatedWidth)
+        val bottom = (top + cropH).coerceAtMost(rotatedHeight)
         return Rect(left, top, right, bottom)
     }
 
