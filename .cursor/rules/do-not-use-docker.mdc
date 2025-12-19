@@ -1,0 +1,4 @@
+---
+description: 当前开发环境是在一个容器内，无法使用 docker 部署组件。
+alwaysApply: false
+---
