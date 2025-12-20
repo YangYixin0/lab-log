@@ -10,8 +10,11 @@ CREATE TABLE IF NOT EXISTS users (
     user_id VARCHAR(64) PRIMARY KEY,
     username VARCHAR(255) UNIQUE NOT NULL,
     public_key_pem TEXT NOT NULL COMMENT 'RSA 公钥（PEM 格式）',
+    password_hash VARCHAR(255) COMMENT 'bcrypt 哈希密码（可选，支持公钥登录的用户可为 NULL）',
+    role ENUM('admin', 'user') DEFAULT 'user' COMMENT '用户角色',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_username (username)
+    INDEX idx_username (username),
+    INDEX idx_role (role)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ==================== 核心日志表 ====================
@@ -20,7 +23,7 @@ CREATE TABLE IF NOT EXISTS logs_raw (
     segment_id VARCHAR(64) NOT NULL,
     start_time DATETIME NOT NULL COMMENT '事件开始时间（来自画面水印）',
     end_time DATETIME NOT NULL COMMENT '事件结束时间',
-    encrypted_structured JSON COMMENT '加密后的结构化数据（字段级加密）',
+    structured JSON COMMENT '结构化数据（字段级加密）',
     raw_text TEXT COMMENT '明文文本（用于检索和嵌入）',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_segment (segment_id),

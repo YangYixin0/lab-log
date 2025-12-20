@@ -166,13 +166,19 @@ def main():
     print("  警告: 请妥善保管私钥文件，不要提交到版本控制系统！")
     
     try:
+        from api.auth import hash_password
+        # 为 admin 用户设置默认密码 "admin"（仅用于测试）
+        admin_password_hash = hash_password('admin')
+        
         with SeekDBClient() as db:
             db.create_user(
                 user_id='admin',
                 username='admin',
-                public_key_pem=public_key_pem
+                public_key_pem=public_key_pem,
+                password_hash=admin_password_hash,
+                role='admin'
             )
-        print("  测试用户创建成功")
+        print("  测试用户创建成功（用户名: admin, 密码: admin, 角色: admin）")
     except Exception as e:
         print(f"  创建测试用户失败: {e}")
         sys.exit(1)

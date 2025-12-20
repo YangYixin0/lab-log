@@ -30,7 +30,7 @@ class LogChunker:
         
         Args:
             events: 事件日志列表
-            
+        
         Returns:
             日志分块列表
         """

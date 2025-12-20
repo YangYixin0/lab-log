@@ -10,6 +10,8 @@
 - **结构化日志**：将视频内容转换为带时间戳的结构化事件日志
 - **字段级加密**：支持对敏感字段（如人物外观特征）进行加密，使用混合加密方案（AES-GCM + RSA-OAEP）
 - **向量检索**：支持日志的向量嵌入和语义搜索，便于后续的智能查询和分析
+- **Web 前端**：提供用户友好的 Web 界面，支持用户注册、登录、查看数据和管理功能
+- **权限管理**：支持用户角色（admin/user），admin 用户可以查看数据库和进行向量搜索
 
 ### 系统架构
 
@@ -21,6 +23,8 @@
 - **日志写入**：将识别的事件写入数据库，并对敏感字段进行加密
 - **向量嵌入**：对日志进行分块和向量化，支持语义搜索
 - **存储**：使用 SeekDB 作为数据库，支持关系型、向量和全文搜索
+- **Web 前端**：React + Vite 构建的用户界面，提供数据查看和管理功能
+- **后端 API**：FastAPI 构建的 RESTful API，支持用户认证和数据访问
 
 ## 工作流程
 
@@ -155,7 +159,9 @@ python scripts/init_database.py
 
 **注意**：初始化脚本会自动读取 `.env` 文件中的数据库配置。如果未配置，将使用默认值（127.0.0.1:2881, root, lab_log, 密码为空）。
 
-### 4. 安装 Python 依赖
+### 4. 安装依赖
+
+#### 4.1 安装 Python 依赖
 
 本项目使用 **uv** 作为包管理工具，并推荐使用虚拟环境。
 
@@ -180,7 +186,73 @@ uv venv
 uv pip install --index-url http://mirrors.cloud.aliyuncs.com/pypi/simple/ -r requirements.txt
 ```
 
-### 5. 处理视频
+#### 4.2 安装 Node.js 和前端依赖
+
+前端使用 React + Vite，需要安装 Node.js 和 npm。
+
+**安装 Node.js**（如果未安装）：
+
+```bash
+# Ubuntu/Debian
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# 验证安装
+node --version
+npm --version
+```
+
+**安装前端依赖**：
+
+```bash
+cd web_ui
+npm install
+cd ..
+```
+
+或者使用启动脚本自动安装（见下一节）。
+
+### 5. 启动 Web 服务
+
+系统提供了统一的启动脚本，会自动启动后端 API、前端开发服务器和配置 Nginx。
+
+```bash
+# 启动所有服务（后端 + 前端 + Nginx）
+./start.sh
+```
+
+该脚本会：
+- 检查并创建虚拟环境（如需要）
+- 检查并安装前端依赖（如需要）
+- 启动后端 API（端口 8000）
+- 启动前端开发服务器（端口 5173）
+- 配置 Nginx 反向代理（端口 50001）
+
+**访问地址**：
+- 统一入口：http://localhost:50001
+- API 文档：http://localhost:50001/api/docs
+- 健康检查：http://localhost:50001/health
+
+**停止服务**：
+
+```bash
+./stop.sh
+```
+
+**查看日志**：
+
+```bash
+# 后端日志
+tail -f /tmp/lab-log-api.log
+
+# 前端日志
+tail -f /tmp/lab-log-frontend.log
+
+# Nginx 日志
+sudo tail -f /var/log/nginx/error.log
+```
+
+### 6. 处理视频
 
 ```bash
 # 如果使用虚拟环境，先激活（或直接使用 .venv/bin/python）
@@ -194,7 +266,51 @@ python scripts/process_video.py /path/to/video.mp4
 可选参数：
 - `--no-indexing`: 禁用索引（分块和嵌入），只写入日志
 
-### 6. 工具脚本
+### 7. Web 前端功能
+
+系统提供了完整的 Web 前端界面，支持以下功能：
+
+#### 7.1 用户功能
+
+- **用户注册**：
+  - 填写用户名和密码（必填）
+  - 系统自动生成 RSA 密钥对（无需手动操作）
+  - 公钥自动上传到服务器
+  - 私钥显示在页面上，提供下载和复制功能
+  - **重要**：私钥仅显示一次，请务必妥善保管
+
+- **用户登录**：
+  - 使用用户名和密码登录
+  - 支持 Session Cookie 管理，自动保持登录状态
+
+- **用户中心**：
+  - 查看用户信息（用户 ID、用户名、角色）
+  - 查看和下载二维码（包含用户 ID 和公钥指纹）
+  - 二维码用于向视频采集端证明身份
+
+#### 7.2 Admin 功能（仅管理员可见）
+
+- **查看数据库**：
+  - 查看所有数据库表（users、logs_raw、logs_embedding、field_encryption_keys、tickets）
+  - 支持分页浏览表数据
+  - 自动刷新（每 10 秒）
+  - 智能列宽：vector 类型较窄，text/json 类型较宽，ID 类型完整显示
+
+- **向量搜索**：
+  - 输入查询文本进行语义搜索
+  - 使用 Qwen text-embedding-v4 生成查询向量
+  - 使用余弦距离计算相似度
+  - 显示搜索结果（分块文本、时间范围、相似度距离等）
+  - 支持设置返回结果数量（1-50）
+
+#### 7.3 导航栏
+
+- 所有用户：用户中心
+- Admin 用户：用户中心、查看数据库、向量搜索
+- 显示当前用户名和角色标签
+- 登出功能
+
+### 8. 工具脚本
 
 项目提供了多个工具脚本用于测试和调试：
 
@@ -216,6 +332,21 @@ python scripts/clear_test_data.py
 ```
 
 ## 功能说明
+
+### 用户认证与权限
+
+- **用户注册**：支持用户名和密码注册，自动生成 RSA 密钥对
+- **密码加密**：使用 bcrypt 进行密码哈希存储
+- **Session 管理**：使用 Session Cookie 进行会话管理
+- **角色权限**：
+  - `user`：普通用户，可以查看自己的信息和二维码
+  - `admin`：管理员，可以查看所有数据库表和进行向量搜索
+
+### 数据安全
+
+- **字段加密**：敏感字段（如 `person.clothing_color`、`person.hair_color`）在写入数据库前会被加密
+- **加密提示**：视频处理提示词中明确说明，敏感信息不能写入未加密字段（如 `raw_text`、`remark` 等）
+- **密钥管理**：用户私钥仅在注册时显示一次，必须妥善保管
 
 ### 视频分段
 - **关键帧对齐**：优先使用关键帧（I 帧）作为分段边界
@@ -247,6 +378,29 @@ python scripts/clear_test_data.py
 
 ```
 lab-log/
+├── api/                 # FastAPI 后端
+│   ├── main.py              # FastAPI 应用入口
+│   ├── dependencies.py      # 依赖注入
+│   ├── auth.py              # 认证逻辑（bcrypt、session）
+│   ├── routers/             # API 路由
+│   │   ├── auth.py          # 认证路由（注册、登录）
+│   │   ├── users.py         # 用户路由（用户信息、二维码）
+│   │   └── admin.py         # Admin 路由（数据库查看、向量搜索）
+│   └── models/              # Pydantic 数据模型
+├── web_ui/              # React 前端
+│   ├── src/
+│   │   ├── components/      # React 组件
+│   │   │   ├── Login.jsx           # 登录页面
+│   │   │   ├── Register.jsx       # 注册页面
+│   │   │   ├── UserDashboard.jsx  # 用户中心
+│   │   │   ├── AdminDashboard.jsx # 数据库查看
+│   │   │   ├── VectorSearch.jsx   # 向量搜索
+│   │   │   ├── QRCode.jsx         # 二维码展示
+│   │   │   └── Navbar.jsx         # 导航栏
+│   │   ├── hooks/          # React Hooks
+│   │   │   └── useAuth.js  # 认证状态管理
+│   │   └── api/            # API 客户端
+│   └── package.json        # 前端依赖
 ├── config/              # 配置模块
 ├── storage/             # 数据库存储
 ├── segmentation/        # 视频分段
@@ -257,14 +411,18 @@ lab-log/
 │   ├── chunking_strategies.py  # 分块策略实现
 │   └── embedding_service.py    # 向量嵌入服务
 ├── orchestration/       # 流程编排
+├── nginx/               # Nginx 配置
+│   └── lab-log.conf     # Nginx 反向代理配置
 ├── scripts/             # 工具脚本
 │   ├── process_video.py         # 视频处理入口
 │   ├── init_database.py         # 数据库初始化
-│   ├── clear_test_data.py        # 清空测试数据
+│   ├── clear_test_data.py       # 清空测试数据
 │   ├── test_segmentation.py     # 测试分段功能
 │   ├── analyze_keyframes.py     # 分析关键帧
 │   ├── extract_segment_aligned.py  # 对齐关键帧提取片段
 │   └── test_vector_search.py    # 测试向量搜索
+├── start.sh             # 启动脚本（后端+前端+Nginx）
+├── stop.sh              # 停止脚本
 └── logs_debug/          # 调试日志（JSONL 格式）
 ```
 
@@ -303,7 +461,8 @@ ORDER BY start_time DESC
 LIMIT 20;
 
 -- 查看结构化数据（JSON 格式）
-SELECT event_id, encrypted_structured 
+-- 注意：字段名已从 encrypted_structured 改为 structured
+SELECT event_id, structured 
 FROM logs_raw 
 WHERE event_id = 'your_event_id';
 
@@ -364,22 +523,55 @@ LIMIT 10;
 
 ## 技术栈
 
+### 后端
+
 - **Python 3.10+**：主要开发语言
 - **uv**：快速 Python 包管理工具
+- **FastAPI**：现代、快速的 Web 框架，用于构建 API
 - **SeekDB**：AI 原生混合搜索数据库（支持向量、全文、JSON）
 - **Qwen3-VL Plus**：视频理解模型（DashScope API）
 - **Qwen text-embedding-v4**：文本向量嵌入模型（1024 维）
 - **ffmpeg/ffprobe**：视频处理和分段
 - **Cryptography**：混合加密（AES-GCM + RSA-OAEP）
+- **bcrypt**：密码哈希加密
+
+### 前端
+
+- **React**：用户界面库
+- **Vite**：快速的前端构建工具
+- **React Router**：客户端路由
+- **Axios**：HTTP 客户端
+- **WebCrypto API**：浏览器原生加密 API，用于生成密钥对
+
+### 基础设施
+
+- **Nginx**：反向代理服务器，统一前端和后端访问
+- **Docker**：用于运行 SeekDB 容器
 
 ## 注意事项
 
-1. **私钥安全**：测试用户的私钥保存在 `scripts/test_keys/`，请勿提交到版本控制系统
+1. **私钥安全**：
+   - 测试用户的私钥保存在 `scripts/test_keys/`，请勿提交到版本控制系统
+   - 用户注册时生成的私钥仅显示一次，请务必妥善保管
+   - 私钥丢失后无法恢复，需要重新注册
+
 2. **API Key**：确保 `DASHSCOPE_API_KEY` 有效且有足够的配额
+
 3. **ffmpeg/ffprobe**：视频处理需要系统已安装 ffmpeg
+
 4. **数据库连接**：确保 SeekDB 服务正在运行
-5. **系统要求**：
+
+5. **Nginx 配置**：
+   - 启动脚本会自动配置 Nginx，但可能需要 root 权限
+   - 如果自动配置失败，请手动复制 `nginx/lab-log.conf` 到 `/etc/nginx/conf.d/` 并重载 Nginx
+
+6. **系统要求**：
    - 支持的系统：任何支持 Docker 的操作系统（Linux、macOS、Windows）
    - 最低配置：1 核 CPU，2GB 内存
-   - 需要安装 Docker（用于运行 SeekDB 容器）
+   - 需要安装：
+     - Docker（用于运行 SeekDB 容器）
+     - Node.js 20+ 和 npm（用于前端）
+     - Nginx（用于反向代理，可选但推荐）
+
+7. **字段名变更**：数据库字段名已从 `encrypted_structured` 改为 `structured`，新初始化的数据库使用新字段名
 

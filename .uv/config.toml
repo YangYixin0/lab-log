@@ -1,0 +1,4 @@
+# uv 配置文件
+# 使用清华镜像源加速下载
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+

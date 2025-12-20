@@ -135,7 +135,7 @@ class Qwen3VLProcessor(VideoProcessor):
         "action": "走进画面",
         "remark": "人物从画面左侧进入"
       }},
-      "raw_text": "一名穿白色衣服的人员在 10:00:00 走进画面"
+      "raw_text": "一名人员在 10:00:00 走进画面"
     }},
     {{
       "event_id": "evt_002",
@@ -158,7 +158,18 @@ class Qwen3VLProcessor(VideoProcessor):
 - 即使视频中只有人物出现、移动、坐下等简单动作，也要记录为事件
 - 如果人物走出画面，也要记录为事件
 - 如果人物回到画面，也要记录为新事件
-- 必须输出有效的 JSON 格式，不能返回空的事件列表（除非视频中真的没有任何内容）"""
+- 必须输出有效的 JSON 格式，不能返回空的事件列表（除非视频中真的没有任何内容）
+
+**数据安全要求**：
+- `structured.person.clothing_color`（衣服颜色）和 `structured.person.hair_color`（头发颜色）字段在后续流程中会被加密存储
+- **严禁**将这些敏感信息（衣服颜色、头发颜色）写入其他未加密字段，包括：
+  - `raw_text` 字段
+  - `structured.remark` 字段
+  - `structured.action` 字段
+  - 任何其他字段
+- 如果将这些信息写入未加密字段，会导致敏感信息泄露，因为未加密字段可以被任何人查看
+- 在 `raw_text` 中描述事件时，应使用通用描述（如"一名人员"、"穿工作服的人员"），而不要提及具体的颜色信息
+- 颜色信息只能且必须放在 `structured.person.clothing_color` 和 `structured.person.hair_color` 字段中"""
         return prompt
     
     def _parse_response(self, response_text: str, segment: VideoSegment) -> List[EventLog]:

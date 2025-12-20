@@ -51,7 +51,7 @@ class SeekDBClient:
         
         sql = """
             INSERT INTO logs_raw (event_id, segment_id, start_time, end_time, 
-                                 encrypted_structured, raw_text)
+                                 structured, raw_text)
             VALUES (%s, %s, %s, %s, %s, %s)
         """
         
@@ -196,24 +196,209 @@ class SeekDBClient:
             self.connection.rollback()
             raise RuntimeError(f"插入日志分块失败: {e}")
     
-    def create_user(self, user_id: str, username: str, public_key_pem: str) -> None:
+    def create_user(self, user_id: str, username: str, public_key_pem: str, 
+                    password_hash: Optional[str] = None, role: str = 'user') -> None:
         """创建用户"""
         self._ensure_connected()
         
         sql = """
-            INSERT INTO users (user_id, username, public_key_pem)
-            VALUES (%s, %s, %s)
+            INSERT INTO users (user_id, username, public_key_pem, password_hash, role)
+            VALUES (%s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE username = VALUES(username), 
-                                   public_key_pem = VALUES(public_key_pem)
+                                   public_key_pem = VALUES(public_key_pem),
+                                   password_hash = VALUES(password_hash),
+                                   role = VALUES(role)
         """
         
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(sql, (user_id, username, public_key_pem))
+                cursor.execute(sql, (user_id, username, public_key_pem, password_hash, role))
             self.connection.commit()
         except Exception as e:
             self.connection.rollback()
             raise RuntimeError(f"创建用户失败: {e}")
+    
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        """根据用户名查询用户"""
+        self._ensure_connected()
+        
+        sql = """
+            SELECT user_id, username, public_key_pem, password_hash, role, created_at
+            FROM users
+            WHERE username = %s
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, (username,))
+                result = cursor.fetchone()
+                return dict(result) if result else None
+        except Exception as e:
+            raise RuntimeError(f"查询用户失败: {e}")
+    
+    def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """根据用户 ID 查询用户"""
+        self._ensure_connected()
+        
+        sql = """
+            SELECT user_id, username, public_key_pem, password_hash, role, created_at
+            FROM users
+            WHERE user_id = %s
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, (user_id,))
+                result = cursor.fetchone()
+                return dict(result) if result else None
+        except Exception as e:
+            raise RuntimeError(f"查询用户失败: {e}")
+    
+    def update_user_role(self, user_id: str, role: str) -> None:
+        """更新用户角色（仅 admin 可用）"""
+        self._ensure_connected()
+        
+        sql = """
+            UPDATE users
+            SET role = %s
+            WHERE user_id = %s
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, (role, user_id))
+            self.connection.commit()
+        except Exception as e:
+            self.connection.rollback()
+            raise RuntimeError(f"更新用户角色失败: {e}")
+    
+    def get_table_names(self) -> List[str]:
+        """获取所有表名"""
+        self._ensure_connected()
+        
+        sql = """
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = %s
+            ORDER BY TABLE_NAME
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, (self.config.DATABASE,))
+                results = cursor.fetchall()
+                return [row['TABLE_NAME'] for row in results]
+        except Exception as e:
+            raise RuntimeError(f"获取表名失败: {e}")
+    
+    def vector_search(self, query_vector: List[float], limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        执行向量搜索（使用余弦距离）
+        
+        Args:
+            query_vector: 查询向量（1024 维）
+            limit: 返回结果数量
+            
+        Returns:
+            搜索结果列表，每个结果包含：
+            - chunk_id: 分块 ID
+            - chunk_text: 分块文本
+            - related_event_ids: 关联的事件 ID（JSON 字符串）
+            - start_time: 开始时间
+            - end_time: 结束时间
+            - distance: 余弦距离
+        """
+        self._ensure_connected()
+        
+        # 将向量转换为 JSON 字符串（需要转义单引号）
+        vector_json = json.dumps(query_vector)
+        # 转义单引号以防止 SQL 注入
+        vector_json_escaped = vector_json.replace("'", "''")
+        
+        sql = f"""
+            SELECT 
+                chunk_id,
+                chunk_text,
+                related_event_ids,
+                start_time,
+                end_time,
+                cosine_distance(embedding, '{vector_json_escaped}') AS distance
+            FROM logs_embedding
+            ORDER BY distance
+            LIMIT %s
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, (limit,))
+                results = cursor.fetchall()
+                
+                # 转换为字典列表
+                search_results = []
+                for row in results:
+                    search_results.append({
+                        'chunk_id': row['chunk_id'],
+                        'chunk_text': row['chunk_text'],
+                        'related_event_ids': row['related_event_ids'],
+                        'start_time': str(row['start_time']) if row['start_time'] else None,
+                        'end_time': str(row['end_time']) if row['end_time'] else None,
+                        'distance': float(row['distance']) if row['distance'] is not None else None
+                    })
+                
+                return search_results
+        except Exception as e:
+            raise RuntimeError(f"向量搜索失败: {e}")
+    
+    def get_table_data(self, table_name: str, page: int = 1, limit: int = 50) -> Dict[str, Any]:
+        """获取表数据（支持分页）"""
+        self._ensure_connected()
+        
+        # 验证表名（防止 SQL 注入）
+        allowed_tables = ['users', 'logs_raw', 'logs_embedding', 'tickets', 'field_encryption_keys']
+        if table_name not in allowed_tables:
+            raise ValueError(f"不允许访问表: {table_name}")
+        
+        offset = (page - 1) * limit
+        
+        # 获取表结构
+        sql_structure = """
+            SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            ORDER BY ORDINAL_POSITION
+        """
+        
+        # 获取数据
+        sql_data = f"SELECT * FROM `{table_name}` LIMIT %s OFFSET %s"
+        
+        # 获取总数
+        sql_count = f"SELECT COUNT(*) as total FROM `{table_name}`"
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # 获取表结构
+                cursor.execute(sql_structure, (self.config.DATABASE, table_name))
+                columns = cursor.fetchall()
+                
+                # 获取总数
+                cursor.execute(sql_count)
+                total_result = cursor.fetchone()
+                total = total_result['total'] if total_result else 0
+                
+                # 获取数据
+                cursor.execute(sql_data, (limit, offset))
+                data = cursor.fetchall()
+                
+                return {
+                    'columns': [dict(col) for col in columns],
+                    'data': [dict(row) for row in data],
+                    'total': total,
+                    'page': page,
+                    'limit': limit,
+                    'total_pages': (total + limit - 1) // limit
+                }
+        except Exception as e:
+            raise RuntimeError(f"获取表数据失败: {e}")
     
     def close(self):
         """关闭连接"""

@@ -25,6 +25,7 @@ logs_debug/
 # 依赖目录
 node_modules/
 venv/
+.venv/
 env/
 __pycache__/
 *.pyc
