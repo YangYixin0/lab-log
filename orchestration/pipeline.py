@@ -74,8 +74,10 @@ class VideoLogPipeline:
         
         print(f"  视频理解完成，共识别 {len(all_events)} 个事件")
         
-        # 3. 写入日志（加密）
-        print("步骤 3/4: 写入日志（加密）...")
+        # 3. 写入日志
+        from config.encryption_config import EncryptionConfig
+        encryption_status = "（加密）" if EncryptionConfig.should_encrypt() else ""
+        print(f"步骤 3/4: 写入日志{encryption_status}...")
         for i, event in enumerate(all_events, 1):
             try:
                 self.log_writer.write_event_log(event)

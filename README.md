@@ -16,7 +16,7 @@
 系统采用模块化设计，主要包含以下模块：
 
 - **视频接入**：支持 MP4 视频文件处理（未来可扩展为流式处理）
-- **视频分段**：使用 GOP 对齐将长视频分割为处理段（约 60 秒）
+- **视频分段**：使用关键帧对齐将长视频分割为处理段（约 60 秒），支持迭代式分段确保连续性
 - **视频理解**：调用 Qwen3-VL Plus API 进行视频内容分析
 - **日志写入**：将识别的事件写入数据库，并对敏感字段进行加密
 - **向量嵌入**：对日志进行分块和向量化，支持语义搜索
@@ -29,7 +29,7 @@
 ```
 视频文件 (MP4)
     ↓
-[视频分段] GOP 对齐，分为多个约 60 秒的片段
+[视频分段] 关键帧对齐，分为多个约 60 秒的片段（迭代式分段确保连续性）
     ↓
 [视频理解] 对每个片段调用 Qwen3-VL Plus，提取事件
     ↓
@@ -39,16 +39,22 @@
     ↓
 [数据写入] 写入 SeekDB 数据库 + 调试 JSONL 文件
     ↓
-[可选] [日志分块] 按时间窗口（5-10 分钟）聚合事件
+[可选] [日志分块] 使用配置的分块策略聚合事件（默认：每个事件一个块）
     ↓
-[可选] [向量嵌入] 使用 Qwen text-embedding-v4 生成向量
+[可选] [向量嵌入] 使用 Qwen text-embedding-v4 生成 1024 维向量
+    ↓
+[可选] [向量索引] 写入 logs_embedding 表，支持向量搜索
     ↓
 完成
 ```
 
 ### 数据流
 
-1. **视频分段**：使用 ffprobe/ffmpeg 按 GOP 边界将视频分段，每个分段约 60 秒
+1. **视频分段**：
+   - 使用 ffprobe 检测所有关键帧（I 帧）位置
+   - 以关键帧为边界进行分段，每个分段约 60 秒
+   - 采用迭代式分段：每提取一个分段后，检查实际结束时间，从那里开始下一个分段
+   - 确保分段连续且无重叠，每个分段不超过 5 分钟
 2. **视频理解**：
    - 调用 Qwen3-VL Plus API 分析视频内容
    - 提取人物动作、设备操作、时间戳等信息
@@ -61,8 +67,8 @@
    - 写入 SeekDB 的 `logs_raw` 表（包含加密后的结构化数据）
    - 同时写入 `logs_debug/event_logs.jsonl` 用于调试
 5. **索引构建**（可选）：
-   - 按时间窗口聚合事件日志
-   - 生成文本向量嵌入
+   - 使用配置的分块策略聚合事件日志（默认：每个事件一个块）
+   - 生成文本向量嵌入（Qwen text-embedding-v4，1024 维）
    - 写入 `logs_embedding` 表，支持后续的向量搜索
 
 ## 快速开始
@@ -188,12 +194,35 @@ python scripts/process_video.py /path/to/video.mp4
 可选参数：
 - `--no-indexing`: 禁用索引（分块和嵌入），只写入日志
 
+### 6. 工具脚本
+
+项目提供了多个工具脚本用于测试和调试：
+
+```bash
+# 测试分段功能（不调用大模型）
+python scripts/test_segmentation.py <视频文件路径>
+
+# 分析视频关键帧位置和间隔
+python scripts/analyze_keyframes.py <视频文件1> [视频文件2] ...
+
+# 从视频中提取片段（自动对齐到关键帧）
+python scripts/extract_segment_aligned.py <视频文件> <起始时间> <结束时间> <输出文件>
+
+# 测试向量搜索功能
+python scripts/test_vector_search.py
+
+# 清空测试数据
+python scripts/clear_test_data.py
+```
+
 ## 功能说明
 
 ### 视频分段
-- 使用 GOP 对齐进行分段
-- 目标段长约 60 秒
-- 自动查找最近的 I 帧边界
+- **关键帧对齐**：优先使用关键帧（I 帧）作为分段边界
+- **迭代式分段**：每提取一个分段后，检查实际结束时间，从那里开始下一个分段，确保连续且无重叠
+- **目标段长**：约 60 秒，但会根据关键帧位置自动调整
+- **最大段长限制**：每个分段不超过 5 分钟，确保发送给大模型的视频不会过长
+- **回退机制**：如果关键帧太少，自动回退到时间分段
 
 ### 视频理解
 - 使用 Qwen3-VL Plus 进行视频理解
@@ -206,9 +235,13 @@ python scripts/process_video.py /path/to/video.mp4
 - 可通过 `config/encryption_config.py` 配置
 
 ### 日志分块与嵌入
-- 按时间窗口（默认 7.5 分钟）聚合事件
-- 使用 Qwen text-embedding-v4 生成 1024 维向量
-- 支持向量搜索
+- **分块策略**：模块化设计，支持多种分块策略
+  - 默认策略：每个事件一个块
+  - 时间窗口策略：按时间窗口（可配置，默认 7.5 分钟）聚合事件
+  - 无人事件间隔策略：以无人事件为间隔进行分块
+  - LLM 智能分块策略：预留接口，支持未来使用 LLM 进行语义分块
+- **向量嵌入**：使用 Qwen text-embedding-v4 生成 1024 维向量
+- **向量搜索**：支持语义搜索，使用余弦距离进行相似度计算
 
 ## 目录结构
 
@@ -220,8 +253,18 @@ lab-log/
 ├── video_processing/    # 视频理解
 ├── log_writer/          # 日志写入与加密
 ├── indexing/            # 分块与嵌入
+│   ├── chunker.py              # 分块器（策略模式）
+│   ├── chunking_strategies.py  # 分块策略实现
+│   └── embedding_service.py    # 向量嵌入服务
 ├── orchestration/       # 流程编排
 ├── scripts/             # 工具脚本
+│   ├── process_video.py         # 视频处理入口
+│   ├── init_database.py         # 数据库初始化
+│   ├── clear_test_data.py        # 清空测试数据
+│   ├── test_segmentation.py     # 测试分段功能
+│   ├── analyze_keyframes.py     # 分析关键帧
+│   ├── extract_segment_aligned.py  # 对齐关键帧提取片段
+│   └── test_vector_search.py    # 测试向量搜索
 └── logs_debug/          # 调试日志（JSONL 格式）
 ```
 
@@ -277,17 +320,35 @@ FROM logs_embedding;
 
 ### 3. 向量搜索
 
+**使用 Python 脚本进行向量搜索**（推荐）：
+
+```bash
+# 使用测试脚本进行向量搜索
+python scripts/test_vector_search.py
+```
+
+**使用 SQL 进行向量搜索**：
+
 ```sql
 -- 示例：使用向量搜索（需要先准备查询向量）
 -- 注意：实际使用时需要从 embedding_service 生成查询向量
 SELECT 
     chunk_id,
     chunk_text,
-    l2_distance(embedding, '[your_query_vector]') AS distance
+    related_event_ids,
+    start_time,
+    end_time,
+    cosine_distance(embedding, '[your_query_vector]') AS distance
 FROM logs_embedding
 ORDER BY distance
 LIMIT 5;
 ```
+
+**向量搜索说明**：
+- 使用余弦距离（Cosine Distance）计算相似度
+- 余弦距离衡量向量方向差异，与向量长度无关，更适合文本嵌入
+- 距离越小（接近 0），相似度越高；距离越大（接近 2），相似度越低
+- 支持语义搜索，可以找到语义相关的内容，即使关键词不完全匹配
 
 ### 4. 全文搜索
 

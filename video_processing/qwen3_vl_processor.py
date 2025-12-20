@@ -96,53 +96,69 @@ class Qwen3VLProcessor(VideoProcessor):
     def _build_prompt(self, segment: VideoSegment) -> str:
         """构建提示词"""
         duration = segment.end_time - segment.start_time
-        prompt = f"""请分析这段实验室视频（时长约 {duration:.1f} 秒）。
+        prompt = f"""请仔细分析这段实验室视频（时长约 {duration:.1f} 秒），并记录所有观察到的事件。
 
-要求：
-1. 识别视频中的人物动作和设备操作
-2. 观察人物外观特征（衣服颜色、头发颜色等）
-3. 记录设备和药品的使用情况
-4. 提取视频画面中的时间戳（格式：Time: HH:MM:SS）
+**重要要求**：
+1. **必须记录所有人物出现和动作**：即使只是人物走进画面、坐下、操作手机或电脑，也要记录为事件
+2. **观察人物外观特征**：衣服颜色、头发颜色等
+3. **记录设备和药品的使用情况**：任何设备操作都要记录
+4. **提取时间信息**：如果画面中有时间戳，请使用；否则使用相对时间
 
-请以 JSON 格式输出结果，每个事件包含以下字段：
-- event_id: 唯一事件 ID
-- start_time: 事件开始时间（ISO 格式，从画面时间戳提取）
+**输出格式**：必须以 JSON 格式输出，包含以下字段：
+- event_id: 唯一事件 ID（格式：evt_001, evt_002...）
+- start_time: 事件开始时间（ISO 格式，如 "2025-12-17T10:00:00"）
 - end_time: 事件结束时间（ISO 格式）
-- structured: 结构化数据
-  - person: 人物信息
-    - present: 是否有人（布尔值）
-    - clothing_color: 衣服颜色（字符串）
+- structured: 结构化数据对象
+  - person: 人物信息对象
+    - present: 是否有人（布尔值，true/false）
+    - clothing_color: 衣服颜色（字符串，如"白色"、"蓝色"等）
     - hair_color: 头发颜色（字符串，可选）
-  - action: 动作描述（字符串）
-  - equipment: 使用的设备（字符串，可选）
+  - action: 动作描述（字符串，如"走进画面"、"操作仪器"、"坐下"、"操作手机"等）
+  - equipment: 使用的设备（字符串，可选，如"离心机"、"电脑"等）
   - chemicals: 使用的药品（字符串，可选）
   - remark: 备注（字符串，可选）
 - raw_text: 事件的自然语言描述（字符串）
 
-输出格式示例：
+**输出示例**：
 {{
   "events": [
     {{
       "event_id": "evt_001",
-      "start_time": "2025-01-01T10:00:00",
-      "end_time": "2025-01-01T10:00:15",
+      "start_time": "2025-12-17T10:00:00",
+      "end_time": "2025-12-17T10:00:15",
       "structured": {{
         "person": {{
           "present": true,
           "clothing_color": "白色",
           "hair_color": "黑色"
         }},
-        "action": "操作离心机",
-        "equipment": "离心机",
-        "remark": "正常操作流程"
+        "action": "走进画面",
+        "remark": "人物从画面左侧进入"
       }},
-      "raw_text": "一名穿白色衣服的人员在 10:00:00 开始操作离心机，操作持续约 15 秒"
+      "raw_text": "一名穿白色衣服的人员在 10:00:00 走进画面"
+    }},
+    {{
+      "event_id": "evt_002",
+      "start_time": "2025-12-17T10:00:15",
+      "end_time": "2025-12-17T10:01:00",
+      "structured": {{
+        "person": {{
+          "present": true,
+          "clothing_color": "白色"
+        }},
+        "action": "操作仪器",
+        "equipment": "离心机"
+      }},
+      "raw_text": "人员在 10:00:15 开始操作离心机，持续约 45 秒"
     }}
   ]
 }}
 
-如果视频中没有明显的事件，可以返回空的事件列表。
-请确保输出的 JSON 格式正确。"""
+**特别注意**：
+- 即使视频中只有人物出现、移动、坐下等简单动作，也要记录为事件
+- 如果人物走出画面，也要记录为事件
+- 如果人物回到画面，也要记录为新事件
+- 必须输出有效的 JSON 格式，不能返回空的事件列表（除非视频中真的没有任何内容）"""
         return prompt
     
     def _parse_response(self, response_text: str, segment: VideoSegment) -> List[EventLog]:
@@ -194,8 +210,10 @@ class Qwen3VLProcessor(VideoProcessor):
                         start_time = base_date + timedelta(seconds=segment.start_time)
                         end_time = base_date + timedelta(seconds=segment.end_time)
                     
-                    # 生成 event_id
-                    event_id = event_data.get('event_id', f"evt_{uuid.uuid4().hex[:8]}")
+                    # 生成 event_id（添加分段标识符确保唯一性）
+                    original_event_id = event_data.get('event_id', f"evt_{uuid.uuid4().hex[:8]}")
+                    # 使用分段 ID 作为前缀，确保不同分段的事件 ID 唯一
+                    event_id = f"{segment.segment_id}_{original_event_id}"
                     
                     # 构建 EventLog
                     event_log = EventLog(

@@ -2,6 +2,13 @@
 
 import os
 from typing import Set
+from dotenv import load_dotenv
+from pathlib import Path
+
+# 加载 .env 文件（如果存在）
+env_path = Path(__file__).parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(env_path)
 
 
 class EncryptionConfig:

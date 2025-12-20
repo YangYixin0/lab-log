@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS logs_embedding (
     start_time DATETIME COMMENT 'chunk 的时间范围开始',
     end_time DATETIME COMMENT 'chunk 的时间范围结束',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    VECTOR INDEX idx_vec (embedding) WITH(DISTANCE=l2, TYPE=hnsw, LIB=vsag) COMMENT '向量索引'
+    VECTOR INDEX idx_vec (embedding) WITH(DISTANCE=cosine, TYPE=hnsw, LIB=vsag) COMMENT '向量索引'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ==================== 工单表 ====================

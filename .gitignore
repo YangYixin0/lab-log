@@ -20,6 +20,7 @@ tmp/
 images/
 recordings/
 test_keys/
+logs_debug/
 
 # 依赖目录
 node_modules/
