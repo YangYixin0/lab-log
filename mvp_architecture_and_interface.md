@@ -139,7 +139,7 @@ encrypted_value = encrypt(value, user_public_key)
 - event_id
 - start_time
 - end_time
-- encrypted_structured (JSON)
+- structured (JSON)
 - raw_text
 
 #### logs_embedding（凌晨生成）

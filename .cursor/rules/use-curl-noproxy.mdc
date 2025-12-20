@@ -1,4 +1,4 @@
 ---
-description: 当前开发环境有代理拦截，使用 curl 命令来判断进程是否正常运行需要使用 --noproxy 参数。
+description: "当前开发环境有代理拦截，使用 curl 命令来判断进程是否正常运行需要使用 --noproxy 参数。"
 alwaysApply: false
 ---

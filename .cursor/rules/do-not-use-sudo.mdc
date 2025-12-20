@@ -1,0 +1,4 @@
+---
+description: "当前开发环境默认是在 root 用户下，使用 sudo 命令反而会报错。所以不要使用 sudo 命令。"
+alwaysApply: false
+---
