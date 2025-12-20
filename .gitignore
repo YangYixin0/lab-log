@@ -19,6 +19,7 @@ tmp/
 *.tmp
 images/
 recordings/
+test_keys/
 
 # 依赖目录
 node_modules/

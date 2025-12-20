@@ -8,6 +8,10 @@ from typing import Tuple
 import pymysql
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
+from dotenv import load_dotenv
+
+# 加载环境变量（.env 文件）
+load_dotenv()
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
@@ -22,18 +26,78 @@ def execute_sql_file(file_path: Path, connection):
     with open(file_path, 'r', encoding='utf-8') as f:
         sql_content = f.read()
     
-    # 分割 SQL 语句（按分号和换行）
-    statements = [s.strip() for s in sql_content.split(';') if s.strip() and not s.strip().startswith('--')]
+    # 分割 SQL 语句（按分号）
+    # 过滤掉纯注释行，但保留包含 SQL 语句的行（即使有注释）
+    statements = []
+    for s in sql_content.split(';'):
+        s = s.strip()
+        if not s:
+            continue
+        # 移除行内注释（-- 开头的行），但保留 SQL 语句
+        lines = [line.strip() for line in s.split('\n') if line.strip() and not line.strip().startswith('--')]
+        if lines:
+            # 重新组合非注释行
+            clean_stmt = ' '.join(lines)
+            if clean_stmt:
+                statements.append(clean_stmt)
+    
+    # 从配置中获取数据库名（更可靠）
+    database_name = DatabaseConfig.DATABASE
+    
+    # 先执行 CREATE DATABASE（如果存在）
+    create_db_stmt = None
+    use_stmt = None
+    other_statements = []
+    
+    for statement in statements:
+        if statement.upper().startswith('CREATE DATABASE'):
+            create_db_stmt = statement
+        elif statement.upper().startswith('USE '):
+            use_stmt = statement
+        else:
+            other_statements.append(statement)
     
     with connection.cursor() as cursor:
-        for statement in statements:
-            if statement:
-                try:
-                    cursor.execute(statement)
-                except Exception as e:
-                    print(f"执行 SQL 失败: {statement[:100]}...")
-                    print(f"错误: {e}")
-                    raise
+        # 1. 先创建数据库
+        if create_db_stmt:
+            try:
+                cursor.execute(create_db_stmt)
+                connection.commit()  # 提交以确保数据库立即可用
+                print(f"  数据库 '{database_name}' 创建成功（或已存在）")
+            except Exception as e:
+                print(f"执行 SQL 失败: {create_db_stmt[:100]}...")
+                print(f"错误: {e}")
+                raise
+        else:
+            # 如果没有 CREATE DATABASE 语句，直接创建
+            try:
+                cursor.execute(f"CREATE DATABASE IF NOT EXISTS {database_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+                connection.commit()
+                print(f"  数据库 '{database_name}' 创建成功（或已存在）")
+            except Exception as e:
+                print(f"创建数据库失败: {e}")
+                raise
+        
+        # 2. 切换到数据库（需要稍等片刻让数据库生效）
+        import time
+        time.sleep(0.1)  # 短暂等待确保数据库创建完成
+        try:
+            connection.select_db(database_name)
+            print(f"  已切换到数据库 '{database_name}'")
+        except Exception as e:
+            print(f"切换数据库失败: {e}")
+            print(f"提示: 请确保数据库 '{database_name}' 已创建")
+            raise
+        
+        # 3. 执行其他语句（CREATE TABLE 等）
+        for statement in other_statements:
+            try:
+                cursor.execute(statement)
+            except Exception as e:
+                print(f"执行 SQL 失败: {statement[:100]}...")
+                print(f"错误: {e}")
+                raise
+    
     connection.commit()
 
 

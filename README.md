@@ -69,30 +69,47 @@
 
 ### 1. 部署 SeekDB
 
-```bash
-cd /root/lab-log
-sudo ./scripts/deploy_seekdb.sh
-```
-
-该脚本将：
-- 添加 OceanBase 的 yum 源
-- 安装 seekdb 和 obclient
-- 启动 seekdb 服务
-
-注意：需要 root 权限或 sudo 权限。
-
-### 2. 初始化数据库
+本项目使用 Docker 部署 SeekDB。使用以下命令启动 SeekDB 容器：
 
 ```bash
-python scripts/init_database.py
+docker run -d \
+  --name seekdb \
+  -p 2881:2881 \
+  quay.io/oceanbase/seekdb:latest
 ```
 
-这将：
-- 创建数据库和表结构
-- 创建测试用户 `admin`
-- 生成 RSA 密钥对（私钥保存在 `scripts/test_keys/admin_private_key.pem`）
+该命令将：
+- 从 quay.io 拉取 SeekDB 镜像（如果本地不存在）
+- 创建并启动名为 `seekdb` 的容器
+- 将容器的 2881 端口映射到主机的 2881 端口
 
-### 3. 配置环境变量
+**验证部署**：
+
+```bash
+# 检查容器状态
+docker ps | grep seekdb
+
+# 查看容器日志
+docker logs seekdb
+
+# 测试连接（需要安装 obclient 或 MySQL 客户端）
+mysql -h127.0.0.1 -uroot -P2881
+```
+
+**停止和重启**：
+
+```bash
+# 停止容器
+docker stop seekdb
+
+# 启动容器
+docker start seekdb
+
+# 删除容器（数据会丢失）
+docker rm -f seekdb
+```
+
+### 2. 配置环境变量
 
 创建 `.env` 文件：
 
@@ -109,19 +126,63 @@ SEEKDB_HOST=127.0.0.1
 SEEKDB_PORT=2881
 SEEKDB_DATABASE=lab_log
 SEEKDB_USER=root
-SEEKDB_PASSWORD=
+SEEKDB_PASSWORD=  # 如果无密码，请留空（SeekDB 默认 root 用户密码为空）
 ```
+
+**注意**：数据库配置会在初始化数据库时使用。如果使用默认值，可以省略数据库配置项。
+
+### 3. 初始化数据库
+
+```bash
+# 如果使用虚拟环境，先激活（或直接使用 .venv/bin/python）
+source .venv/bin/activate
+python scripts/init_database.py
+
+# 或者不激活，直接使用虚拟环境的 Python
+.venv/bin/python scripts/init_database.py
+```
+
+这将：
+- 创建数据库和表结构
+- 创建测试用户 `admin`
+- 生成 RSA 密钥对（私钥保存在 `scripts/test_keys/admin_private_key.pem`）
+
+**注意**：初始化脚本会自动读取 `.env` 文件中的数据库配置。如果未配置，将使用默认值（127.0.0.1:2881, root, lab_log, 密码为空）。
 
 ### 4. 安装 Python 依赖
 
+本项目使用 **uv** 作为包管理工具，并推荐使用虚拟环境。
+
+**方法 1：使用安装脚本（推荐，自动使用国内镜像源）**
+
 ```bash
-pip install -r requirements.txt
+./scripts/install_deps.sh
+```
+
+该脚本会自动：
+- 创建虚拟环境（如果不存在）
+- 使用国内镜像源加速安装
+- 安装所有依赖包
+
+**方法 2：手动使用 uv 安装**
+
+```bash
+# 创建虚拟环境
+uv venv
+
+# 安装依赖（使用国内镜像源加速）
+uv pip install --index-url http://mirrors.cloud.aliyuncs.com/pypi/simple/ -r requirements.txt
 ```
 
 ### 5. 处理视频
 
 ```bash
+# 如果使用虚拟环境，先激活（或直接使用 .venv/bin/python）
+source .venv/bin/activate
 python scripts/process_video.py /path/to/video.mp4
+
+# 或者不激活，直接使用虚拟环境的 Python
+.venv/bin/python scripts/process_video.py /path/to/video.mp4
 ```
 
 可选参数：
@@ -243,6 +304,7 @@ LIMIT 10;
 ## 技术栈
 
 - **Python 3.10+**：主要开发语言
+- **uv**：快速 Python 包管理工具
 - **SeekDB**：AI 原生混合搜索数据库（支持向量、全文、JSON）
 - **Qwen3-VL Plus**：视频理解模型（DashScope API）
 - **Qwen text-embedding-v4**：文本向量嵌入模型（1024 维）
@@ -256,7 +318,7 @@ LIMIT 10;
 3. **ffmpeg/ffprobe**：视频处理需要系统已安装 ffmpeg
 4. **数据库连接**：确保 SeekDB 服务正在运行
 5. **系统要求**：
-   - 支持的系统：CentOS/RHEL/Anolis OS/Ubuntu 等（推荐 RPM 平台）
+   - 支持的系统：任何支持 Docker 的操作系统（Linux、macOS、Windows）
    - 最低配置：1 核 CPU，2GB 内存
-   - 需要 systemd 作为服务管理器（用于启动 SeekDB）
+   - 需要安装 Docker（用于运行 SeekDB 容器）
 
