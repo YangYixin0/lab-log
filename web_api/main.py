@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from api.routers import auth, users, admin
+from web_api.routers import auth, users, admin
 
 app = FastAPI(
     title="Lab Log API",

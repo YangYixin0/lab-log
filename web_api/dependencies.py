@@ -3,7 +3,7 @@
 from typing import Optional
 from fastapi import Cookie, HTTPException, status
 from storage.seekdb_client import SeekDBClient
-from api.auth import get_session
+from web_api.auth import get_session
 
 
 def get_db() -> SeekDBClient:

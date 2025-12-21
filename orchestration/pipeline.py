@@ -21,7 +21,7 @@ class VideoLogPipeline:
                  chunker: Optional[LogChunker] = None,
                  embedding_service: Optional[EmbeddingService] = None,
                  db_client: Optional[SeekDBClient] = None,
-                 enable_indexing: bool = True):
+                 enable_indexing: bool = False):
         """
         初始化处理流程
         
@@ -31,7 +31,7 @@ class VideoLogPipeline:
             chunker: 日志分块器，如果为 None 则创建默认实例
             embedding_service: 嵌入服务，如果为 None 则创建默认实例
             db_client: 数据库客户端，如果为 None 则创建默认实例
-            enable_indexing: 是否启用索引（分块和嵌入）
+            enable_indexing: 是否启用索引（分块和嵌入），默认 False（索引通常在测试时手动触发或生产环境定时任务中执行）
         """
         self.db_client = db_client or SeekDBClient()
         
@@ -103,8 +103,55 @@ class VideoLogPipeline:
         print("视频处理完成！")
         return all_events
     
+    def index_events(self, events: List[EventLog]) -> dict:
+        """
+        对事件进行分块和嵌入（公共方法，供实时处理流程调用）
+        
+        Args:
+            events: 要索引的事件列表
+        
+        Returns:
+            包含索引结果的字典：{'chunks': 分块数量, 'success': 成功数量, 'failed': 失败数量}
+        """
+        if not self.enable_indexing or not events:
+            return {'chunks': 0, 'success': 0, 'failed': 0}
+        
+        # 分块
+        chunks = self.chunker.chunk_events(events)
+        
+        if not chunks:
+            return {'chunks': 0, 'success': 0, 'failed': 0}
+        
+        # 为每个分块生成嵌入并写入数据库
+        success_count = 0
+        failed_count = 0
+        for chunk in chunks:
+            try:
+                # 生成嵌入
+                embedding = self.embedding_service.embed_text(chunk.chunk_text)
+                chunk.embedding = embedding
+                
+                # 写入数据库
+                self.db_client.insert_log_chunk(
+                    chunk_id=chunk.chunk_id,
+                    chunk_text=chunk.chunk_text,
+                    related_event_ids=chunk.related_event_ids,
+                    embedding=embedding,
+                    start_time=chunk.start_time.isoformat(),
+                    end_time=chunk.end_time.isoformat()
+                )
+                success_count += 1
+            except Exception as e:
+                failed_count += 1
+                print(f"[Indexing] 处理分块失败 ({chunk.chunk_id}): {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        return {'chunks': len(chunks), 'success': success_count, 'failed': failed_count}
+    
     def _index_events(self, events: List[EventLog]) -> None:
-        """对事件进行分块和嵌入"""
+        """对事件进行分块和嵌入（内部方法，供 process_video 调用）"""
         # 分块
         chunks = self.chunker.chunk_events(events)
         print(f"  生成 {len(chunks)} 个分块")

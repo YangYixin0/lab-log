@@ -17,6 +17,7 @@ import android.graphics.Typeface
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -177,6 +178,480 @@ data class ClientCapabilities(
 )
 //endregion
 
+//region MP4分段封装器
+/**
+ * 使用MediaMuxer封装MP4分段
+ * 负责将H264编码数据封装成MP4文件，并在达到分段时长且是关键帧时触发分段完成
+ */
+class MP4SegmentMuxer(
+    private val segmentDurationSeconds: Double,
+    private val onSegmentComplete: (ByteArray, String) -> Unit,
+    private val onSegmentFinished: (() -> Unit)? = null  // 分段完成后的回调，用于启动新分段
+) {
+    private var mediaMuxer: MediaMuxer? = null
+    private var videoTrackIndex: Int = -1
+    private var isStarted: Boolean = false
+    private var segmentStartTimeUs: Long = 0
+    private var segmentSequence: Int = 0
+    private var tempFile: java.io.File? = null
+    private var firstFrameTimeUs: Long = -1
+    private var lastFrameTimeUs: Long = -1
+    private var frameCount: Int = 0  // 当前分段的帧数计数
+    private var videoWidth: Int = 0
+    private var videoHeight: Int = 0
+    private var videoFps: Int = 0
+    private var cachedSpsBuffer: ByteBuffer? = null  // 缓存的SPS，在分段间复用
+    private var cachedPpsBuffer: ByteBuffer? = null  // 缓存的PPS，在分段间复用
+    
+    /**
+     * 设置CSD（从MediaCodec的outputFormat中获取）
+     * @param sps SPS ByteBuffer
+     * @param pps PPS ByteBuffer（可选）
+     */
+    fun setCSD(sps: ByteBuffer, pps: ByteBuffer?) {
+        // 复制ByteBuffer内容，避免原始buffer被修改
+        val spsArray = ByteArray(sps.remaining())
+        sps.duplicate().get(spsArray)
+        var finalSps = spsArray
+        var finalPps: ByteArray? = null
+
+        if (pps != null) {
+            val ppsArray = ByteArray(pps.remaining())
+            pps.duplicate().get(ppsArray)
+            finalPps = ppsArray
+        } else {
+            // 某些设备只在 csd-0 中提供 SPS+PPS，尝试拆分
+            val (parsedSps, parsedPps) = parseSpsPpsFromBuffer(spsArray)
+            parsedSps?.let { spsBuf ->
+                val spsArray = ByteArray(spsBuf.remaining())
+                spsBuf.duplicate().get(spsArray)
+                finalSps = spsArray
+            }
+            parsedPps?.let { ppsBuf ->
+                val ppsArray = ByteArray(ppsBuf.remaining())
+                ppsBuf.duplicate().get(ppsArray)
+                finalPps = ppsArray
+            }
+        }
+
+        cachedSpsBuffer = ByteBuffer.wrap(finalSps)
+        cachedPpsBuffer = finalPps?.let { ByteBuffer.wrap(it) }
+        Log.d(TAG, "MP4SegmentMuxer: CSD set, SPS size=${finalSps.size}, PPS size=${finalPps?.size ?: 0}")
+    }
+    
+    /**
+     * 开始新分段
+     * @param width 视频宽度
+     * @param height 视频高度
+     * @param fps 帧率
+     */
+    fun startSegment(width: Int, height: Int, fps: Int) {
+        try {
+            // 创建临时文件
+            tempFile = java.io.File.createTempFile("segment_", ".mp4", null)
+            tempFile?.deleteOnExit()
+            
+            mediaMuxer = MediaMuxer(tempFile!!.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            videoTrackIndex = -1
+            isStarted = false
+            segmentStartTimeUs = System.currentTimeMillis() * 1000 // 使用当前时间作为起始时间
+            firstFrameTimeUs = -1
+            lastFrameTimeUs = -1
+            frameCount = 0
+            videoWidth = width
+            videoHeight = height
+            videoFps = fps
+            // 不清空缓存的SPS/PPS，在新分段中复用
+            
+            Log.d(TAG, "MP4SegmentMuxer: Started new segment, temp file: ${tempFile?.absolutePath}, ${width}x${height}@${fps}fps")
+        } catch (e: Exception) {
+            Log.e(TAG, "MP4SegmentMuxer: Failed to start segment", e)
+            throw RuntimeException("Failed to start MP4 segment", e)
+        }
+    }
+    
+    /**
+     * 添加编码帧到MediaMuxer
+     * @param encodedData 编码后的H264数据
+     * @param bufferInfo MediaCodec.BufferInfo
+     * @return true表示需要开始新分段（达到时长且是关键帧），false表示继续当前分段
+     */
+    fun addFrame(encodedData: ByteArray, bufferInfo: MediaCodec.BufferInfo): Boolean {
+        val muxer = mediaMuxer ?: return false
+        
+        try {
+            // 检查是否是关键帧
+            val isKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 ||
+                    (encodedData.size > 4 && (encodedData[4].toInt() and 0x1F) == 5)
+            
+            // 记录第一帧时间
+            if (firstFrameTimeUs < 0) {
+                firstFrameTimeUs = bufferInfo.presentationTimeUs
+            }
+            lastFrameTimeUs = bufferInfo.presentationTimeUs
+            
+            // 如果还没有添加视频轨道，检查是否有关键帧并提取CSD
+            if (videoTrackIndex < 0) {
+                // 仅在关键帧启动新分段
+                if (!isKeyframe) return false
+
+                // 优先使用缓存的CSD（来自 MediaCodec outputFormat 或上一分段）
+                var spsBuffer = cachedSpsBuffer
+                var ppsBuffer = cachedPpsBuffer
+
+                // 如果缺少任意一方，尝试从当前关键帧解析并回写缓存
+                if (spsBuffer == null || ppsBuffer == null) {
+                    val csd = extractCSDFromKeyframe(encodedData)
+                    if (csd != null) {
+                        spsBuffer = csd.first
+                        ppsBuffer = csd.second
+                        cachedSpsBuffer = spsBuffer
+                        cachedPpsBuffer = ppsBuffer
+                        Log.d(TAG, "MP4SegmentMuxer: Extracted and cached CSD from keyframe (refresh)")
+                    } else if (spsBuffer != null && ppsBuffer == null) {
+                        // 尝试从已有 SPS 中拆出 PPS（兼容只有 csd-0 的设备）
+                        val parsed = parseSpsPpsFromBuffer(spsBuffer.duplicate().let { buf ->
+                            val arr = ByteArray(buf.remaining())
+                            buf.get(arr)
+                            arr
+                        })
+                        parsed.first?.let { spsBuffer = it }
+                        parsed.second?.let { pps ->
+                            ppsBuffer = pps
+                            cachedPpsBuffer = pps
+                            Log.d(TAG, "MP4SegmentMuxer: Recovered PPS from cached SPS buffer")
+                        }
+                    }
+                }
+
+                if (spsBuffer != null) {
+                    // 创建MediaFormat，包含宽高和CSD
+                    val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, videoWidth, videoHeight).apply {
+                        setInteger(MediaFormat.KEY_FRAME_RATE, videoFps)
+                        setByteBuffer("csd-0", spsBuffer) // SPS
+                        ppsBuffer?.let { setByteBuffer("csd-1", it) } // PPS
+                    }
+                    videoTrackIndex = muxer.addTrack(format)
+                    muxer.start()
+                    isStarted = true
+                    Log.d(TAG, "MP4SegmentMuxer: Added video track, videoTrackIndex=$videoTrackIndex, ${videoWidth}x${videoHeight}@${videoFps}fps (using cached/parsed CSD)")
+                } else {
+                    // 无法提取CSD，等待下一个关键帧
+                    Log.w(TAG, "MP4SegmentMuxer: Failed to extract CSD from keyframe, waiting for next keyframe")
+                    return false
+                }
+            }
+            
+            // 写入帧数据
+            if (isStarted && videoTrackIndex >= 0) {
+                val buffer = ByteBuffer.allocate(bufferInfo.size)
+                buffer.put(encodedData)
+                buffer.position(bufferInfo.offset)
+                buffer.limit(bufferInfo.offset + bufferInfo.size)
+                muxer.writeSampleData(videoTrackIndex, buffer, bufferInfo)
+                frameCount++
+                
+                // 检查是否需要分段：达到目标时长且是关键帧
+                // 确保至少已经写入了一些帧（至少10帧或1秒）后再检查分段
+                if (isKeyframe && firstFrameTimeUs >= 0 && lastFrameTimeUs > firstFrameTimeUs && frameCount >= 10) {
+                    val currentDurationSeconds = (lastFrameTimeUs - firstFrameTimeUs) / 1_000_000.0
+                    // 确保至少1秒的时长，避免第一个关键帧立即触发分段
+                    if (currentDurationSeconds >= 1.0 && currentDurationSeconds >= segmentDurationSeconds) {
+                        // 完成当前分段
+                        finishSegment()
+                        // 通知需要启动新分段
+                        onSegmentFinished?.invoke()
+                        return true
+                    }
+                }
+            }
+            
+            return false
+        } catch (e: Exception) {
+            Log.e(TAG, "MP4SegmentMuxer: Error adding frame", e)
+            throw RuntimeException("Failed to add frame to MP4 segment", e)
+        }
+    }
+    
+    /**
+     * 完成当前分段，读取MP4数据并回调
+     */
+    fun finishSegment() {
+        val muxer = mediaMuxer ?: return
+        val file = tempFile ?: return
+        
+        try {
+            if (isStarted) {
+                muxer.stop()
+            }
+            muxer.release()
+            mediaMuxer = null
+            isStarted = false
+            videoTrackIndex = -1
+            
+            // 读取MP4文件数据
+            val mp4Data = file.readBytes()
+            file.delete()
+            
+            // 生成分段ID：时间戳_序号（两位数）
+            val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                .format(java.util.Date())
+            val segmentId = String.format("%s_%02d", timestamp, segmentSequence)
+            segmentSequence = (segmentSequence + 1) % 100 // 两位数，0-99循环
+            
+            Log.d(TAG, "MP4SegmentMuxer: Segment completed, id=$segmentId, size=${mp4Data.size} bytes")
+            
+            // 回调通知分段完成
+            onSegmentComplete(mp4Data, segmentId)
+            
+            tempFile = null
+        } catch (e: Exception) {
+            Log.e(TAG, "MP4SegmentMuxer: Error finishing segment", e)
+            throw RuntimeException("Failed to finish MP4 segment", e)
+        }
+    }
+    
+    /**
+     * 停止并清理资源
+     */
+    fun stop() {
+        try {
+            if (isStarted && mediaMuxer != null) {
+                finishSegment()
+            } else {
+                mediaMuxer?.release()
+                mediaMuxer = null
+            }
+            tempFile?.delete()
+            tempFile = null
+            isStarted = false
+            videoTrackIndex = -1
+            segmentSequence = 0
+            Log.d(TAG, "MP4SegmentMuxer: Stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "MP4SegmentMuxer: Error stopping", e)
+        }
+    }
+    
+    /**
+     * 从关键帧中提取CSD（SPS/PPS）
+     * @return Pair<SPS ByteBuffer, PPS ByteBuffer?>，如果提取失败返回null
+     */
+    private fun extractCSDFromKeyframe(encodedData: ByteArray): Pair<ByteBuffer, ByteBuffer?>? {
+        // 先按 Annex-B 起始码扫描
+        var pos = 0
+        var sps: ByteArray? = null
+        var pps: ByteArray? = null
+        
+        while (pos < encodedData.size - 4) {
+            // 查找起始码
+            if (encodedData[pos] == 0x00.toByte() && 
+                encodedData[pos + 1] == 0x00.toByte() &&
+                encodedData[pos + 2] == 0x00.toByte() &&
+                encodedData[pos + 3] == 0x01.toByte()) {
+                val nalType = (encodedData[pos + 4].toInt() and 0x1F)
+                val startPos = pos + 4
+                
+                // 查找下一个起始码
+                var nextPos = pos + 5
+                while (nextPos < encodedData.size - 4) {
+                    if (encodedData[nextPos] == 0x00.toByte() &&
+                        encodedData[nextPos + 1] == 0x00.toByte() &&
+                        encodedData[nextPos + 2] == 0x00.toByte() &&
+                        encodedData[nextPos + 3] == 0x01.toByte()) {
+                        break
+                    }
+                    nextPos++
+                }
+                
+                val nalData = if (nextPos < encodedData.size) {
+                    encodedData.sliceArray(startPos until nextPos)
+                } else {
+                    encodedData.sliceArray(startPos until encodedData.size)
+                }
+                
+                when (nalType) {
+                    7 -> { // SPS
+                        sps = nalData
+                    }
+                    8 -> { // PPS
+                        pps = nalData
+                    }
+                }
+                
+                pos = nextPos
+            } else if (pos < encodedData.size - 3 &&
+                       encodedData[pos] == 0x00.toByte() &&
+                       encodedData[pos + 1] == 0x00.toByte() &&
+                       encodedData[pos + 2] == 0x01.toByte()) {
+                val nalType = (encodedData[pos + 3].toInt() and 0x1F)
+                val startPos = pos + 3
+                
+                var nextPos = pos + 4
+                while (nextPos < encodedData.size - 3) {
+                    if (encodedData[nextPos] == 0x00.toByte() &&
+                        encodedData[nextPos + 1] == 0x00.toByte() &&
+                        (encodedData[nextPos + 2] == 0x01.toByte() || 
+                         (nextPos + 3 < encodedData.size && encodedData[nextPos + 2] == 0x00.toByte() && encodedData[nextPos + 3] == 0x01.toByte()))) {
+                        break
+                    }
+                    nextPos++
+                }
+                
+                val nalData = if (nextPos < encodedData.size) {
+                    encodedData.sliceArray(startPos until nextPos)
+                } else {
+                    encodedData.sliceArray(startPos until encodedData.size)
+                }
+                
+                when (nalType) {
+                    7 -> { // SPS
+                        sps = nalData
+                    }
+                    8 -> { // PPS
+                        pps = nalData
+                    }
+                }
+                
+                pos = nextPos
+            } else {
+                pos++
+            }
+        }
+        
+        // 如果仍未找到 PPS，尝试处理长度前缀（AVCC）格式
+        if (sps == null || pps == null) {
+            val parsed = parseSpsPpsFromBuffer(encodedData)
+            parsed.first?.let { spsBuf ->
+                val spsArray = ByteArray(spsBuf.remaining())
+                spsBuf.duplicate().get(spsArray)
+                sps = spsArray
+            }
+            parsed.second?.let { ppsBuf ->
+                val ppsArray = ByteArray(ppsBuf.remaining())
+                ppsBuf.duplicate().get(ppsArray)
+                pps = ppsArray
+            }
+        }
+        
+        return if (sps != null) {
+            Pair(ByteBuffer.wrap(sps), pps?.let { ByteBuffer.wrap(it) })
+        } else {
+            null
+        }
+    }
+
+    /**
+     * 尝试从一段字节中解析出 SPS / PPS（兼容 Annex-B 起始码和 AVCC 长度前缀）。
+     */
+    private fun parseSpsPpsFromBuffer(data: ByteArray): Pair<ByteBuffer?, ByteBuffer?> {
+        var sps: ByteArray? = null
+        var pps: ByteArray? = null
+
+        fun handleNal(nal: ByteArray) {
+            val type = nal.firstOrNull()?.toInt()?.and(0x1F) ?: return
+            when (type) {
+                7 -> sps = nal
+                8 -> pps = nal
+            }
+        }
+
+        // 优先按起始码扫描
+        var i = 0
+        while (i <= data.size - 4) {
+            val isLongStart = data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()
+            val isShortStart = data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()
+            if (isLongStart || isShortStart) {
+                val start = i + if (isLongStart) 4 else 3
+                var next = start
+                while (next <= data.size - 4) {
+                    val nextLong = data[next] == 0.toByte() && data[next + 1] == 0.toByte() && data[next + 2] == 0.toByte() && data[next + 3] == 1.toByte()
+                    val nextShort = data[next] == 0.toByte() && data[next + 1] == 0.toByte() && data[next + 2] == 1.toByte()
+                    if (nextLong || nextShort) break
+                    next++
+                }
+                val nal = data.sliceArray(start until next.coerceAtMost(data.size))
+                handleNal(nal)
+                i = next
+            } else {
+                i++
+            }
+        }
+
+        // 如果未找到 PPS，再尝试长度前缀 AVCC
+        if (pps == null) {
+            var offset = 0
+            while (offset + 4 <= data.size) {
+                val len = ByteBuffer.wrap(data, offset, 4).order(ByteOrder.BIG_ENDIAN).int
+                if (len <= 0 || offset + 4 + len > data.size) break
+                val nal = data.sliceArray(offset + 4 until offset + 4 + len)
+                handleNal(nal)
+                offset += 4 + len
+                if (sps != null && pps != null) break
+            }
+        }
+
+        // 仍未找到且看起来是 AVC Decoder Configuration Record，则按 AVCC 规范解析
+        if (sps == null || pps == null) {
+            val avccParsed = parseSpsPpsFromAvccConfig(data)
+            if (avccParsed.first != null && sps == null) {
+                sps = avccParsed.first
+            }
+            if (avccParsed.second != null && pps == null) {
+                pps = avccParsed.second
+            }
+        }
+
+        return Pair(sps?.let { ByteBuffer.wrap(it) }, pps?.let { ByteBuffer.wrap(it) })
+    }
+
+    /**
+     * 解析 AVC Decoder Configuration Record（avcC box payload）中的 SPS/PPS。
+     * 参考 ISO/IEC 14496-15：version(1), profile/compat/level(3), lengthSizeMinusOne(1),
+     * numOfSequenceParameterSets(1 & 0x1F), each SPS: 16-bit len + data,
+     * numOfPictureParameterSets(1), each PPS: 16-bit len + data。
+     */
+    private fun parseSpsPpsFromAvccConfig(data: ByteArray): Pair<ByteArray?, ByteArray?> {
+        try {
+            if (data.size < 7) return Pair(null, null)
+            var offset = 0
+            val version = data[offset].toInt() and 0xFF
+            if (version != 1) return Pair(null, null)
+            offset += 4 // version + profile/compat/level
+            val lengthSizeMinusOne = data[offset].toInt() and 0x03
+            if (lengthSizeMinusOne !in 0..3) return Pair(null, null)
+            offset++
+            val numSps = data[offset].toInt() and 0x1F
+            offset++
+            var sps: ByteArray? = null
+            repeat(numSps) {
+                if (offset + 2 > data.size) return Pair(sps, null)
+                val spsLen = ((data[offset].toInt() and 0xFF) shl 8) or (data[offset + 1].toInt() and 0xFF)
+                offset += 2
+                if (offset + spsLen > data.size) return Pair(sps, null)
+                sps = data.copyOfRange(offset, offset + spsLen)
+                offset += spsLen
+            }
+            if (offset >= data.size) return Pair(sps, null)
+            val numPps = data[offset].toInt() and 0xFF
+            offset++
+            var pps: ByteArray? = null
+            repeat(numPps) {
+                if (offset + 2 > data.size) return Pair(sps, pps)
+                val ppsLen = ((data[offset].toInt() and 0xFF) shl 8) or (data[offset + 1].toInt() and 0xFF)
+                offset += 2
+                if (offset + ppsLen > data.size) return Pair(sps, pps)
+                pps = data.copyOfRange(offset, offset + ppsLen)
+                offset += ppsLen
+            }
+            return Pair(sps, pps)
+        } catch (_: Exception) {
+            return Pair(null, null)
+        }
+    }
+}
+//endregion
+
 //region H.264 编码器封装
 /**
  * 对 Android 平台的 MediaCodec 进行简单封装：
@@ -184,11 +659,24 @@ data class ClientCapabilities(
  * - encode() 接收 CameraX 的 ImageProxy，完成 YUV->NV12 转换并送入编码器
  * - 编码输出通过回调 onFrameEncoded 向外传递
  */
-class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
+class H264Encoder(
+    private val onFrameEncoded: (EncodedFrame) -> Unit,
+    private val mp4Muxer: MP4SegmentMuxer? = null
+) {
 
     private var mediaCodec: MediaCodec? = null
+    private var isFirstKeyframeReceived = false  // 是否已收到第一个关键帧
+    var encoderWidth: Int = 0
+        private set
+    var encoderHeight: Int = 0
+        private set
+    var encoderFps: Int = 0
+        private set
 
     fun start(width: Int, height: Int, bitrate: Int, targetFps: Int) {
+        encoderWidth = width
+        encoderHeight = height
+        encoderFps = if (targetFps > 0) targetFps else 10
         // MediaCodec 的帧率设置主要给编码器内部参考；真实发送帧率由上层 Analyzer 控制
         val frameRate = if (targetFps > 0) targetFps else 10
         val mediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
@@ -200,8 +688,10 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // Key frame every second
+            // 确保每个 IDR 前置 SPS/PPS，便于分段解码
+            setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
         }
-        Log.d(TAG, "Encoder config: ${width}x${height}")
+            Log.d(TAG, "Encoder config: ${width}x${height}")
 
         try {
             mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
@@ -209,6 +699,9 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
                 start()
             }
             Log.d(TAG, "H.264 Encoder started successfully")
+            
+            // 如果使用MP4Muxer，启动第一个分段
+            mp4Muxer?.startSegment(width, height, encoderFps)
         } catch (e: IOException) {
             Log.e(TAG, "Failed to create H.264 encoder", e)
         }
@@ -246,14 +739,49 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
 
             val bufferInfo = MediaCodec.BufferInfo()
             var outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
+            
             while (outputBufferIndex >= 0) {
+                // 检查输出格式变化（包含CSD数据）
+                if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val format = codec.outputFormat
+                    // 从输出格式中提取CSD（SPS/PPS）
+                    val csd0 = format.getByteBuffer("csd-0")  // SPS
+                    val csd1 = format.getByteBuffer("csd-1")  // PPS
+                    if (csd0 != null) {
+                        // 将CSD传递给MP4Muxer缓存
+                        mp4Muxer?.setCSD(csd0, csd1)
+                        Log.d(TAG, "H264Encoder: Extracted CSD from output format, SPS size=${csd0.remaining()}, PPS size=${csd1?.remaining() ?: 0}")
+                    }
+                    outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
+                    continue
+                }
                 val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
                 if (outputBuffer != null && bufferInfo.size > 0) {
                     val encodedData = ByteArray(bufferInfo.size)
                     outputBuffer.get(encodedData)
-                    // 使用编码器输出的时间戳作为“设备时间”，与原始图像时间基本一致
+                    
+                    // 检查是否是关键帧（IDR帧）
+                    // 方法1：检查BUFFER_FLAG_KEY_FRAME标志
+                    val isKeyframeByFlag = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                    // 方法2：检查NAL类型（NAL类型5是IDR帧）
+                    val isIdrFrame = encodedData.size > 4 && (encodedData[4].toInt() and 0x1F) == 5
+                    val isKeyframe = isKeyframeByFlag || isIdrFrame
+                    
+                    // 如果是第一个关键帧，标记已收到
+                    if (!isFirstKeyframeReceived && isKeyframe) {
+                        isFirstKeyframeReceived = true
+                        Log.d(TAG, "First keyframe received, SPS/PPS should be complete")
+                    }
+                    
+                    // 如果使用MP4Muxer，将帧添加到muxer
+                    mp4Muxer?.addFrame(encodedData, bufferInfo)
+                    
+                    // 使用编码器输出的时间戳作为"设备时间"，与原始图像时间基本一致
                     val timestampMs = bufferInfo.presentationTimeUs / 1000L
-                    onFrameEncoded(EncodedFrame(encodedData, timestampMs))
+                    // 只有在不使用MP4Muxer时才通过回调发送H264帧
+                    if (mp4Muxer == null) {
+                        onFrameEncoded(EncodedFrame(encodedData, timestampMs))
+                    }
                 }
                 codec.releaseOutputBuffer(outputBufferIndex, false)
                 outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
@@ -265,12 +793,16 @@ class H264Encoder(private val onFrameEncoded: (EncodedFrame) -> Unit) {
 
     fun stop() {
         try {
+            // 如果使用MP4Muxer，完成最后一个分段
+            mp4Muxer?.finishSegment()
+            
             mediaCodec?.stop()
             mediaCodec?.release()
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping encoder", e)
         }
         mediaCodec = null
+        isFirstKeyframeReceived = false  // 重置状态
         Log.d(TAG, "H.264 Encoder stopped.")
     }
 }
@@ -316,8 +848,8 @@ object OcrBFontRenderer {
     @Volatile
     private var preloadCompleted = false
     
-    // 需要预加载的字符集（时间戳 "Time: hh:mm:ss" 所需）
-    private const val PRELOAD_CHARS = "0123456789: Time"
+    // 需要预加载的字符集（时间戳 "YYYY-MM-DDTHH:mm:ss" 所需）
+    private const val PRELOAD_CHARS = "0123456789-:Time"
     
     /**
      * 初始化字体渲染器，加载 OCR-B 字体
@@ -632,7 +1164,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     }
     
     /**
-     * 获取当前时间戳字符串，格式为 "Time: hh:mm:ss"（24小时格式）
+     * 获取当前时间戳字符串，格式为 ISO 8601 "YYYY-MM-DDTHH:mm:ss"（24小时格式）
      * 每秒更新一次缓存，减少字符串格式化开销
      */
     fun getCurrentTimestampString(): String {
@@ -642,10 +1174,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         if (currentSecond != cachedTimestampSecond) {
             val calendar = java.util.Calendar.getInstance()
             calendar.timeInMillis = currentTime
+            val year = calendar.get(java.util.Calendar.YEAR)
+            val month = calendar.get(java.util.Calendar.MONTH) + 1  // Calendar.MONTH is 0-based
+            val day = calendar.get(java.util.Calendar.DAY_OF_MONTH)
             val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
             val minute = calendar.get(java.util.Calendar.MINUTE)
             val second = calendar.get(java.util.Calendar.SECOND)
-            cachedTimestamp = String.format("Time: %02d:%02d:%02d", hour, minute, second)
+            cachedTimestamp = String.format("%04d-%02d-%02d Time %02d:%02d:%02d", year, month, day, hour, minute, second)
             cachedTimestampSecond = currentSecond
         }
         
@@ -926,9 +1461,11 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                         val bitrateMb = payload.optInt("bitrate", 4) // 默认 4 MB
                         val bitrateBps = bitrateMb * 1_000_000 // 转换为 bps
 
-                        // fps 缺省或为 0 时表示“不限制帧率”，Analyzer 尽可能多发
+                        // fps 缺省或为 0 时表示"不限制帧率"，Analyzer 尽可能多发
                         val fps = payload.optInt("fps", 0)
-                        startStreaming(aspectRatio, bitrateBps, fps)
+                        // segmentDuration 缺省为 60.0 秒
+                        val segmentDuration = payload.optDouble("segmentDuration", 60.0)
+                        startStreaming(aspectRatio, bitrateBps, fps, segmentDuration)
                     } else {
                         Log.w(TAG, "start_capture payload missing, ignoring")
                     }
@@ -941,7 +1478,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun startStreaming(aspectRatio: Rational, bitrate: Int, fps: Int) {
+    private fun startStreaming(aspectRatio: Rational, bitrate: Int, fps: Int, segmentDuration: Double = 60.0) {
         if (_uiState.value.isStreaming) return
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -964,24 +1501,36 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 droppedFrames = 0
                 encoderStarted = false
 
-                var frameSequence = 0L
-                h264Encoder = H264Encoder { encodedFrame ->
-                    if (_uiState.value.isConnected) {
-                        val payload = encodedFrame.data
-                        val headerSize = 16
-                        // 自定义帧头（二进制）：
-                        // [0..7]   int64  timestampMs（设备时间）
-                        // [8..11]  int32  frameSequence（低 32 位递增序号）
-                        // [12..15] int32  payload.size（后续 H.264 数据长度）
-                        val buffer = ByteBuffer.allocate(headerSize + payload.size).order(ByteOrder.BIG_ENDIAN)
-                        buffer.putLong(encodedFrame.timestampMs)
-                        buffer.putInt((frameSequence and 0xFFFFFFFF).toInt())
-                        buffer.putInt(payload.size)
-                        buffer.put(payload)
-                        frameSequence = (frameSequence + 1) and 0xFFFFFFFFL
-                        webSocket?.send(buffer.array().toByteString())
+                // 创建MP4SegmentMuxer（使用var以便在回调中引用）
+                var mp4Muxer: MP4SegmentMuxer? = null
+                mp4Muxer = MP4SegmentMuxer(
+                    segmentDuration,
+                    onSegmentComplete = { mp4Data, segmentId ->
+                        // 分段完成回调：发送MP4分段到服务器
+                        sendMP4Segment(mp4Data, segmentId)
+                    },
+                    onSegmentFinished = {
+                        // 分段完成后，启动新分段（在后台线程）
+                        viewModelScope.launch(Dispatchers.IO) {
+                            try {
+                                val encoder = h264Encoder
+                                if (encoder != null) {
+                                    mp4Muxer?.startSegment(encoder.encoderWidth, encoder.encoderHeight, encoder.encoderFps)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to start new segment", e)
+                            }
+                        }
                     }
-                }
+                )
+                
+                // 创建H264Encoder，传入MP4Muxer
+                h264Encoder = H264Encoder(
+                    onFrameEncoded = { encodedFrame ->
+                        // 不再发送H264帧，MP4分段由MP4Muxer回调发送
+                    },
+                    mp4Muxer = mp4Muxer
+                )
 
                 // 获取显示旋转，确保 ImageAnalysis 和 Preview 使用相同的旋转
                 val windowManager = getApplication<Application>().getSystemService(Context.WINDOW_SERVICE) as? WindowManager
@@ -1189,6 +1738,40 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.d(TAG, "--> Sent status: $statusJson")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send status", e)
+            }
+        }
+    }
+    
+    /**
+     * 发送MP4分段到服务器
+     * @param mp4Data MP4文件数据
+     * @param segmentId 分段ID（格式：时间戳_序号）
+     */
+    private fun sendMP4Segment(mp4Data: ByteArray, segmentId: String) {
+        if (!_uiState.value.isConnected) {
+            Log.w(TAG, "Not connected, cannot send MP4 segment")
+            return
+        }
+        
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Base64编码MP4数据
+                val base64Data = android.util.Base64.encodeToString(mp4Data, android.util.Base64.NO_WRAP)
+                
+                // 构造JSON消息
+                val message = JSONObject().apply {
+                    put("type", "mp4_segment")
+                    put("segment_id", segmentId)
+                    put("data", base64Data)
+                    put("size", mp4Data.size)
+                }.toString()
+                
+                webSocket?.send(message)
+                Log.d(TAG, "--> Sent MP4 segment: $segmentId, size=${mp4Data.size} bytes")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send MP4 segment: $segmentId", e)
+                // 发送错误状态
+                sendStatus(ClientStatus("error", "Failed to send MP4 segment: ${e.message}"))
             }
         }
     }
@@ -1676,7 +2259,7 @@ private fun surfaceRotationToDegrees(rotation: Int): Int = when (rotation) {
 
 
 data class WebSocketUiState(
-    val url: String = "ws://pqzc1405495.bohrium.tech:50001/android-cam",
+    val url: String = "ws://39.98.165.184:50002/android-cam",
     val isConnected: Boolean = false,
     val isStreaming: Boolean = false,
     val statusMessage: String = "Disconnected"

@@ -1,14 +1,14 @@
 """Admin 专用路由"""
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from api.models.schemas import (
+from web_api.models.schemas import (
     TableListResponse, 
     TableDataResponse,
     VectorSearchRequest,
     VectorSearchResponse,
     VectorSearchResult
 )
-from api.dependencies import get_db, get_current_user
+from web_api.dependencies import get_db, get_current_user
 from storage.seekdb_client import SeekDBClient
 from indexing.embedding_service import EmbeddingService
 

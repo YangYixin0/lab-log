@@ -166,7 +166,7 @@ def main():
     print("  警告: 请妥善保管私钥文件，不要提交到版本控制系统！")
     
     try:
-        from api.auth import hash_password
+        from web_api.auth import hash_password
         # 为 admin 用户设置默认密码 "admin"（仅用于测试）
         admin_password_hash = hash_password('admin')
         

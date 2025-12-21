@@ -13,7 +13,7 @@
   - CameraX 负责相机预览 + YUV 图像采集
   - MediaCodec 负责 H.264 硬件编码
   - OkHttp WebSocket 负责与服务器通信
-- **后端（`backend/server.py`）**
+- **后端（`streaming_server/server.py`）**
   - 使用 `websockets` 库实现 WebSocket 服务器
   - 接收来自手机的 H.264 帧，写入 `recordings/<client>/<session>/stream.h264`
   - 根据时间戳估算 FPS，使用 `ffmpeg` 封装为 MP4
@@ -270,7 +270,7 @@ App 在关键状态变更时发送 `ClientStatus`：
 
 ## 运行与联调步骤（简版）
 
-1. **启动后端（在 `backend/` 目录）**
+1. **启动后端（在 `streaming_server/` 目录）**
 
    ```bash
    pip install -r requirements.txt
@@ -304,7 +304,7 @@ App 在关键状态变更时发送 `ClientStatus`：
    - **重要**：预览使用的宽高比与实际编码发送到服务器的视频完全一致，用户在预览中看到的取景范围就是最终录制的范围。
 
 5. **从服务器开始录制**
-   - 在 `backend/server.py` 运行的终端输入，例如：
+   - 在 `streaming_server/server.py` 运行的终端输入，例如：
 
      ```text
      # 使用 App 当前选择的宽高比（4:3、16:9 或不裁剪），码率 4 MB，FPS 10
@@ -344,7 +344,7 @@ App 在关键状态变更时发送 `ClientStatus`：
      [Info]: MP4 saved to recordings/<client>_<timestamp>/stream.mp4
      ```
 
-   - 到 `backend/recordings/` 目录下即可找到对应的文件夹，包含：
+   - 到 `streaming_server/recordings/` 目录下即可找到对应的文件夹，包含：
      - `stream.h264`：原始 H.264 流
      - `stream.mp4`：封装后的 MP4 视频（视频已在 Android 端旋转完成，无需后端再旋转）
      - `thumbnail.jpg`：第一帧的缩略图（视频已在 Android 端旋转完成，无需后端再旋转）

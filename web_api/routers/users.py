@@ -2,9 +2,9 @@
 
 import json
 from fastapi import APIRouter, Depends, HTTPException, status
-from api.models.schemas import UserResponse, QRCodeResponse
-from api.dependencies import get_db, get_current_user
-from api.auth import calculate_public_key_fingerprint
+from web_api.models.schemas import UserResponse, QRCodeResponse
+from web_api.dependencies import get_db, get_current_user
+from web_api.auth import calculate_public_key_fingerprint
 from storage.seekdb_client import SeekDBClient
 
 router = APIRouter(prefix="/api/users", tags=["users"])

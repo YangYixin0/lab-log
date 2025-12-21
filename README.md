@@ -6,7 +6,7 @@
 
 ### 核心特性
 
-- **视频理解**：使用 Qwen3-VL Plus 视觉大模型分析实验室视频，自动识别人物动作、设备操作等信息
+- **视频理解**：使用 Qwen3-VL Flash 视觉大模型分析实验室视频，自动识别人物动作、设备操作等信息
 - **结构化日志**：将视频内容转换为带时间戳的结构化事件日志
 - **字段级加密**：支持对敏感字段（如人物外观特征）进行加密，使用混合加密方案（AES-GCM + RSA-OAEP）
 - **向量检索**：支持日志的向量嵌入和语义搜索，便于后续的智能查询和分析
@@ -19,23 +19,24 @@
 
 - **视频接入**：支持 MP4 视频文件处理（未来可扩展为流式处理）
 - **视频分段**：使用关键帧对齐将长视频分割为处理段（约 60 秒），支持迭代式分段确保连续性
-- **视频理解**：调用 Qwen3-VL Plus API 进行视频内容分析
+- **视频理解**：调用 Qwen3-VL Flash API 进行视频内容分析
 - **日志写入**：将识别的事件写入数据库，并对敏感字段进行加密
 - **向量嵌入**：对日志进行分块和向量化，支持语义搜索
 - **存储**：使用 SeekDB 作为数据库，支持关系型、向量和全文搜索
 - **Web 前端**：React + Vite 构建的用户界面，提供数据查看和管理功能
 - **后端 API**：FastAPI 构建的 RESTful API，支持用户认证和数据访问
+- **流媒体服务器**：WebSocket 服务器，接收 Android 端推送的 MP4 分段（经 H.264 编码），串行处理并写入日志 / 索引
 
 ## 工作流程
 
-### 整体流程
+### 整体流程（逻辑视角）
 
 ```
 视频文件 (MP4)
     ↓
 [视频分段] 关键帧对齐，分为多个约 60 秒的片段（迭代式分段确保连续性）
     ↓
-[视频理解] 对每个片段调用 Qwen3-VL Plus，提取事件
+[视频理解] 对每个片段调用 Qwen3-VL Flash，提取事件
     ↓
 [日志生成] 将识别的事件转换为结构化 EventLog
     ↓
@@ -52,6 +53,17 @@
 完成
 ```
 
+### 两种处理路径
+
+1) **实时处理（Android 采集端 → WebSocket 服务器）**
+   - Android 端用 MediaCodec 编码 H.264，并在关键帧前附带完整 SPS/PPS（关键经验：给 IDR 帧前置 SPS/PPS，保证每段 MP4 可独立解码），使用 MediaMuxer 生成小 MP4 分段，通过 WebSocket 发送到服务器。
+   - 服务器 `streaming_server` 接收 Base64 MP4 文本消息，落盘到 `recordings/`，按环境开关决定是否实时处理和索引。
+   - 处理管线：VideoLogPipeline → 写入 logs_raw（加密字段）+ 可选索引 logs_embedding → 生成缩略图 → 单行 Realtime 日志输出。
+
+2) **离线处理（已有 MP4 文件）**
+   - 使用 `scripts/process_video.py /path/to/video.mp4`（可选 `--indexing`）直接跑 VideoLogPipeline。
+   - 生成事件日志（logs_raw / event_logs.jsonl），若开启索引则写入 logs_embedding。
+
 ### 数据流
 
 1. **视频分段**：
@@ -60,7 +72,7 @@
    - 采用迭代式分段：每提取一个分段后，检查实际结束时间，从那里开始下一个分段
    - 确保分段连续且无重叠，每个分段不超过 5 分钟
 2. **视频理解**：
-   - 调用 Qwen3-VL Plus API 分析视频内容
+   - 调用 Qwen3-VL Flash API 分析视频内容
    - 提取人物动作、设备操作、时间戳等信息
    - 生成结构化的事件列表（EventLog）
 3. **日志加密**（如启用）：
@@ -79,7 +91,11 @@
 
 ### 1. 部署 SeekDB
 
-本项目使用 Docker 部署 SeekDB。使用以下命令启动 SeekDB 容器：
+本项目使用 Docker 部署 SeekDB。
+
+#### 1.1 首次部署
+
+使用以下命令启动 SeekDB 容器：
 
 ```bash
 docker run -d \
@@ -93,20 +109,39 @@ docker run -d \
 - 创建并启动名为 `seekdb` 的容器
 - 将容器的 2881 端口映射到主机的 2881 端口
 
-**验证部署**：
+**注意**：首次启动时，SeekDB 需要一些时间进行初始化（通常需要 10-30 秒），请耐心等待。
+
+#### 1.2 启动已存在的容器
+
+如果容器已经创建但已停止，使用以下命令启动：
 
 ```bash
-# 检查容器状态
+# 查看容器状态
+docker ps -a | grep seekdb
+
+# 启动容器
+docker start seekdb
+
+# 等待初始化完成（约 10-30 秒）
+sleep 15
+```
+
+#### 1.3 验证部署
+
+```bash
+# 检查容器状态（应该显示 "Up"）
 docker ps | grep seekdb
 
-# 查看容器日志
-docker logs seekdb
+# 查看容器日志（确认初始化完成）
+docker logs seekdb | tail -20
 
-# 测试连接（需要安装 obclient 或 MySQL 客户端）
+# 测试连接（需要安装 MySQL 客户端）
 mysql -h127.0.0.1 -uroot -P2881
 ```
 
-**停止和重启**：
+如果连接成功，说明 SeekDB 已准备就绪。
+
+#### 1.4 停止和重启
 
 ```bash
 # 停止容器
@@ -115,8 +150,52 @@ docker stop seekdb
 # 启动容器
 docker start seekdb
 
-# 删除容器（数据会丢失）
+# 重启容器
+docker restart seekdb
+
+# 删除容器（数据会丢失，谨慎操作）
 docker rm -f seekdb
+```
+
+#### 1.5 常见问题
+
+**问题 1：容器启动后无法连接**
+
+- 等待更长时间（SeekDB 初始化需要时间）
+- 检查容器日志：`docker logs seekdb`
+- 确认端口 2881 未被占用：`netstat -tlnp | grep 2881`
+
+**问题 2：容器已存在但无法启动**
+
+```bash
+# 查看容器状态
+docker ps -a | grep seekdb
+
+# 如果容器状态为 "Exited"，尝试启动
+docker start seekdb
+
+# 如果启动失败，查看日志
+docker logs seekdb
+```
+
+**问题 3：需要重新初始化数据库**
+
+如果数据库出现问题，可以删除容器并重新创建（**注意：这会丢失所有数据**）：
+
+```bash
+# 停止并删除容器
+docker stop seekdb
+docker rm seekdb
+
+# 重新创建容器
+docker run -d \
+  --name seekdb \
+  -p 2881:2881 \
+  quay.io/oceanbase/seekdb:latest
+
+# 等待初始化完成后，重新运行初始化脚本
+sleep 20
+python scripts/init_database.py
 ```
 
 ### 2. 配置环境变量
@@ -130,6 +209,13 @@ DASHSCOPE_API_KEY=your_api_key_here
 # 加密配置（可选）
 ENCRYPTION_ENABLED=true
 ENCRYPTION_TEST_USER_ID=admin
+
+# 实时处理配置（可选）
+REALTIME_PROCESSING_ENABLED=true  # 是否启用实时处理（默认true）
+REALTIME_TARGET_SEGMENT_DURATION=60.0  # 目标分段时长（秒，默认60）
+REALTIME_QUEUE_ALERT_THRESHOLD=10  # 队列告警阈值（默认10）
+REALTIME_CLEANUP_H264=true  # 是否清理H264临时文件（默认true）
+REALTIME_INDEXING_ENABLED=false  # 实时处理时是否启用索引（分块和嵌入，默认false）
 
 # 数据库配置（可选，使用默认值）
 SEEKDB_HOST=127.0.0.1
@@ -252,7 +338,45 @@ tail -f /tmp/lab-log-frontend.log
 sudo tail -f /var/log/nginx/error.log
 ```
 
-### 6. 处理视频
+### 6. 启动流媒体服务器（用于实时采集）
+
+流媒体服务器用于接收 Android App 推送的 H264 视频流，并进行实时处理和日志记录。
+
+```bash
+# 如果使用虚拟环境，先激活（或直接使用 .venv/bin/python）
+source .venv/bin/activate
+python streaming_server/server.py
+
+# 或者不激活，直接使用虚拟环境的 Python
+.venv/bin/python streaming_server/server.py
+
+# 指定主机和端口（可选）
+python streaming_server/server.py --host 0.0.0.0 --port 50001
+```
+
+**启动成功后会看到**：
+```
+WebSocket server started at ws://0.0.0.0:50001
+You can now connect your Android Camera App.
+[Info]: Realtime processing enabled (target segment duration: 60.0s)
+
+Enter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'): 
+  Example: 'start 4:3 4 10' for 4:3 aspect ratio, 4 MB bitrate, 10 fps
+> 
+```
+
+**功能说明**：
+- 默认监听 `0.0.0.0:50001`（可通过参数修改）
+- 支持实时处理：自动检测关键帧并分段处理视频
+- 支持终端命令控制：输入 `start` 开始录制，`stop` 停止录制
+- 详细使用说明请参考 `android-camera/README.md`
+
+**停止服务器**：
+- 按 `Ctrl+C` 停止服务器
+
+### 7. 处理视频（离线处理）
+
+处理已录制的 MP4 视频文件：
 
 ```bash
 # 如果使用虚拟环境，先激活（或直接使用 .venv/bin/python）
@@ -264,13 +388,13 @@ python scripts/process_video.py /path/to/video.mp4
 ```
 
 可选参数：
-- `--no-indexing`: 禁用索引（分块和嵌入），只写入日志
+- `--indexing`: 启用索引（分块和嵌入），默认不进行索引（索引通常在测试时手动触发或生产环境定时任务中执行）
 
-### 7. Web 前端功能
+### 8. Web 前端功能
 
 系统提供了完整的 Web 前端界面，支持以下功能：
 
-#### 7.1 用户功能
+#### 8.1 用户功能
 
 - **用户注册**：
   - 填写用户名和密码（必填）
@@ -288,7 +412,7 @@ python scripts/process_video.py /path/to/video.mp4
   - 查看和下载二维码（包含用户 ID 和公钥指纹）
   - 二维码用于向视频采集端证明身份
 
-#### 7.2 Admin 功能（仅管理员可见）
+#### 8.2 Admin 功能（仅管理员可见）
 
 - **查看数据库**：
   - 查看所有数据库表（users、logs_raw、logs_embedding、field_encryption_keys、tickets）
@@ -303,14 +427,14 @@ python scripts/process_video.py /path/to/video.mp4
   - 显示搜索结果（分块文本、时间范围、相似度距离等）
   - 支持设置返回结果数量（1-50）
 
-#### 7.3 导航栏
+#### 8.3 导航栏
 
 - 所有用户：用户中心
 - Admin 用户：用户中心、查看数据库、向量搜索
 - 显示当前用户名和角色标签
 - 登出功能
 
-### 8. 工具脚本
+### 9. 工具脚本
 
 项目提供了多个工具脚本用于测试和调试：
 
@@ -356,7 +480,7 @@ python scripts/clear_test_data.py
 - **回退机制**：如果关键帧太少，自动回退到时间分段
 
 ### 视频理解
-- 使用 Qwen3-VL Plus 进行视频理解
+- 使用 Qwen3-VL Flash 进行视频理解
 - 自动提取人物动作、设备操作等信息
 - 从视频画面提取时间戳
 
@@ -366,6 +490,10 @@ python scripts/clear_test_data.py
 - 可通过 `config/encryption_config.py` 配置
 
 ### 日志分块与嵌入
+- **默认行为**：视频处理默认不进行索引（分块和嵌入），以提高处理速度
+- **索引触发方式**：
+  - 测试时：使用 `--indexing` 参数手动触发
+  - 生产环境：在特定时间（如凌晨）通过定时任务批量执行索引
 - **分块策略**：模块化设计，支持多种分块策略
   - 默认策略：每个事件一个块
   - 时间窗口策略：按时间窗口（可配置，默认 7.5 分钟）聚合事件
@@ -378,7 +506,11 @@ python scripts/clear_test_data.py
 
 ```
 lab-log/
-├── api/                 # FastAPI 后端
+├── streaming_server/    # WebSocket 流媒体服务器
+│   ├── server.py            # WebSocket 服务器（接收H264流）
+│   ├── h264_parser.py       # H264流解析器（关键帧检测）
+│   └── monitoring.py        # 监控和统计模块
+├── web_api/            # FastAPI RESTful API
 │   ├── main.py              # FastAPI 应用入口
 │   ├── dependencies.py      # 依赖注入
 │   ├── auth.py              # 认证逻辑（bcrypt、session）
@@ -529,7 +661,7 @@ LIMIT 10;
 - **uv**：快速 Python 包管理工具
 - **FastAPI**：现代、快速的 Web 框架，用于构建 API
 - **SeekDB**：AI 原生混合搜索数据库（支持向量、全文、JSON）
-- **Qwen3-VL Plus**：视频理解模型（DashScope API）
+- **Qwen3-VL Flash**：视频理解模型（DashScope API）
 - **Qwen text-embedding-v4**：文本向量嵌入模型（1024 维）
 - **ffmpeg/ffprobe**：视频处理和分段
 - **Cryptography**：混合加密（AES-GCM + RSA-OAEP）
@@ -573,5 +705,7 @@ LIMIT 10;
      - Node.js 20+ 和 npm（用于前端）
      - Nginx（用于反向代理，可选但推荐）
 
-7. **字段名变更**：数据库字段名已从 `encrypted_structured` 改为 `structured`，新初始化的数据库使用新字段名
+7. **实时采集编码注意**：Android 端为每个关键帧前置完整 SPS/PPS（启用 `MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES`），保证分段 MP4 独立可解码，避免因缺少 PPS 导致封装/播放失败。
+
+8. **字段名变更**：数据库字段名已从 `encrypted_structured` 改为 `structured`，新初始化的数据库使用新字段名
 

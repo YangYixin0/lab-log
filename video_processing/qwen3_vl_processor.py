@@ -18,15 +18,15 @@ load_dotenv()
 
 
 class Qwen3VLProcessor(VideoProcessor):
-    """Qwen3-VL Plus 视频理解处理器"""
+    """Qwen3-VL Flash 视频理解处理器"""
     
-    def __init__(self, api_key: str = None, model: str = "qwen3-vl-plus", fps: float = 1.0):
+    def __init__(self, api_key: str = None, model: str = "qwen3-vl-flash", fps: float = 1.0):
         """
         初始化处理器
         
         Args:
             api_key: DashScope API Key，如果为 None 则从环境变量读取
-            model: 模型名称，默认 qwen3-vl-plus
+            model: 模型名称，默认 qwen3-vl-flash
             fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧
         """
         self.api_key = api_key or os.getenv('DASHSCOPE_API_KEY')
@@ -99,10 +99,12 @@ class Qwen3VLProcessor(VideoProcessor):
         prompt = f"""请仔细分析这段实验室视频（时长约 {duration:.1f} 秒），并记录所有观察到的事件。
 
 **重要要求**：
-1. **必须记录所有人物出现和动作**：即使只是人物走进画面、坐下、操作手机或电脑，也要记录为事件
-2. **观察人物外观特征**：衣服颜色、头发颜色等
-3. **记录设备和药品的使用情况**：任何设备操作都要记录
-4. **提取时间信息**：如果画面中有时间戳，请使用；否则使用相对时间
+1. **必须使用视频画面左上角的时间戳水印**：视频画面左上角有 "Time: HH:MM:SS" 格式的时间戳水印（OCR-B字体），这是视频的绝对时间，必须使用此时间戳作为事件的 start_time 和 end_time
+2. **时间戳格式转换**：水印格式为 "Time: HH:MM:SS"（24小时制），请将其转换为 ISO 8601 格式（如 "2025-12-17T10:00:00"）。如果无法确定日期，使用今天的日期
+3. **如果水印不可见或模糊**：才使用相对时间（基于视频开始时间）
+4. **必须记录所有人物出现和动作**：即使只是人物走进画面、坐下、操作手机或电脑，也要记录为事件
+5. **观察人物外观特征**：衣服颜色、头发颜色等
+6. **记录设备和药品的使用情况**：任何设备操作都要记录
 
 **输出格式**：必须以 JSON 格式输出，包含以下字段：
 - event_id: 唯一事件 ID（格式：evt_001, evt_002...）

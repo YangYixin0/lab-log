@@ -368,8 +368,47 @@ class SeekDBClient:
             ORDER BY ORDINAL_POSITION
         """
         
-        # 获取数据
-        sql_data = f"SELECT * FROM `{table_name}` LIMIT %s OFFSET %s"
+        # 获取数据（按created_at降序排序，新数据在前）
+        # 检查表是否有created_at字段
+        sql_data = f"SELECT * FROM `{table_name}`"
+        has_created_at = False
+        
+        # 先检查是否有created_at字段
+        try:
+            check_column_sql = """
+                SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = 'created_at'
+            """
+            with self.connection.cursor() as check_cursor:
+                check_cursor.execute(check_column_sql, (self.config.DATABASE, table_name))
+                result = check_cursor.fetchone()
+                has_created_at = result['cnt'] > 0 if result else False
+        except Exception:
+            # 如果检查失败，不添加排序
+            has_created_at = False
+        
+        if has_created_at:
+            # 按created_at降序，相同时间按event_id降序（如果表有event_id字段）
+            # 检查是否有event_id字段
+            has_event_id = False
+            try:
+                check_event_id_sql = """
+                    SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = 'event_id'
+                """
+                with self.connection.cursor() as check_cursor:
+                    check_cursor.execute(check_event_id_sql, (self.config.DATABASE, table_name))
+                    result = check_cursor.fetchone()
+                    has_event_id = result['cnt'] > 0 if result else False
+            except Exception:
+                has_event_id = False
+            
+            if has_event_id:
+                sql_data += " ORDER BY created_at DESC, event_id DESC"
+            else:
+                sql_data += " ORDER BY created_at DESC"
+        
+        sql_data += " LIMIT %s OFFSET %s"
         
         # 获取总数
         sql_count = f"SELECT COUNT(*) as total FROM `{table_name}`"

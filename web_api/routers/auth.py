@@ -3,9 +3,9 @@
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie
-from api.models.schemas import UserRegister, UserLogin, UserResponse
-from api.auth import hash_password, verify_password, create_session, delete_session
-from api.dependencies import get_db
+from web_api.models.schemas import UserRegister, UserLogin, UserResponse
+from web_api.auth import hash_password, verify_password, create_session, delete_session
+from web_api.dependencies import get_db
 from storage.seekdb_client import SeekDBClient
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])

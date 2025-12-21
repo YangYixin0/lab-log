@@ -27,7 +27,7 @@ if [ -f /tmp/lab-log-frontend.pid ]; then
 fi
 
 # 清理可能残留的进程
-pkill -f "uvicorn api.main:app" 2>/dev/null
+pkill -f "uvicorn web_api.main:app" 2>/dev/null
 pkill -f "vite" 2>/dev/null
 
 # 注意：Nginx 不会自动停止，需要手动停止或保持运行

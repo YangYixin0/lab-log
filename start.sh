@@ -40,7 +40,7 @@ fi
 
 # 启动后端 API（后台运行）
 echo -e "${BLUE}📡 启动后端 API (端口 8000)...${NC}"
-uv run uvicorn api.main:app --reload --host 127.0.0.1 --port 8000 > /tmp/lab-log-api.log 2>&1 &
+uv run uvicorn web_api.main:app --reload --host 127.0.0.1 --port 8000 > /tmp/lab-log-api.log 2>&1 &
 API_PID=$!
 echo "  后端 PID: $API_PID"
 echo "  日志文件: /tmp/lab-log-api.log"
