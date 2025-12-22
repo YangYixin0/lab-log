@@ -20,7 +20,7 @@ load_dotenv()
 class Qwen3VLProcessor(VideoProcessor):
     """Qwen3-VL Flash 视频理解处理器"""
     
-    def __init__(self, api_key: str = None, model: str = "qwen3-vl-flash", fps: float = 1.0):
+    def __init__(self, api_key: str = None, model: str = "qwen3-vl-flash", fps: float = 1.0, enable_thinking: bool = True, thinking_budget: int = 81920):
         """
         初始化处理器
         
@@ -28,6 +28,8 @@ class Qwen3VLProcessor(VideoProcessor):
             api_key: DashScope API Key，如果为 None 则从环境变量读取
             model: 模型名称，默认 qwen3-vl-flash
             fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧
+            enable_thinking: 是否启用思考，默认 True
+            thinking_budget: 思考预算，默认 81920 tokens。qwen3-vl-flash最大支持 81920 tokens
         """
         self.api_key = api_key or os.getenv('DASHSCOPE_API_KEY')
         if not self.api_key:
@@ -76,7 +78,10 @@ class Qwen3VLProcessor(VideoProcessor):
             response = MultiModalConversation.call(
                 api_key=self.api_key,
                 model=self.model,
-                messages=messages
+                messages=messages,
+                stream=False,
+                enable_thinking=self.enable_thinking,
+                thinking_budget=self.thinking_budget
             )
             
             # 解析响应
