@@ -84,6 +84,7 @@ class LogWriter:
             segment_id=event_log.segment_id,
             start_time=event_log.start_time,
             end_time=event_log.end_time,
+            event_type=event_log.event_type,  # 传递 event_type
             structured=structured,  # 已加密的 structured
             raw_text=event_log.raw_text
         )
@@ -122,6 +123,7 @@ class LogWriter:
             "segment_id": event_log.segment_id,
             "start_time": event_log.start_time.isoformat(),
             "end_time": event_log.end_time.isoformat(),
+            "event_type": event_log.event_type,  # 包含 event_type
             "structured": encrypted_structured,  # 已加密的结构化数据
             "raw_text": event_log.raw_text
         }

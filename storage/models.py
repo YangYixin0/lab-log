@@ -21,8 +21,9 @@ class EventLog:
     segment_id: str
     start_time: datetime
     end_time: datetime
-    structured: Dict[str, Any]  # 固定 schema
-    raw_text: str
+    event_type: Optional[str] = None  # 事件类型，如 "person"、"equipment-only"
+    structured: Dict[str, Any] = field(default_factory=dict)  # 固定 schema
+    raw_text: str = ""
 
 
 @dataclass

@@ -20,7 +20,7 @@ load_dotenv()
 class Qwen3VLProcessor(VideoProcessor):
     """Qwen3-VL Flash 视频理解处理器"""
     
-    def __init__(self, api_key: str = None, model: str = "qwen3-vl-flash", fps: float = 1.0, enable_thinking: bool = True, thinking_budget: int = 81920):
+    def __init__(self, api_key: str = None, model: str = "qwen3-vl-flash", fps: float = 1.0, enable_thinking: bool = True, thinking_budget: int = 8192):
         """
         初始化处理器
         
@@ -29,7 +29,7 @@ class Qwen3VLProcessor(VideoProcessor):
             model: 模型名称，默认 qwen3-vl-flash
             fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧
             enable_thinking: 是否启用思考，默认 True
-            thinking_budget: 思考预算，默认 81920 tokens。qwen3-vl-flash最大支持 81920 tokens
+            thinking_budget: 思考预算，默认 8192 tokens。qwen3-vl-flash最大支持 81920 tokens
         """
         self.api_key = api_key or os.getenv('DASHSCOPE_API_KEY')
         if not self.api_key:
@@ -37,6 +37,8 @@ class Qwen3VLProcessor(VideoProcessor):
         
         self.model = model
         self.fps = fps
+        self.enable_thinking = enable_thinking
+        self.thinking_budget = thinking_budget
     
     def process_segment(self, segment: VideoSegment) -> VideoUnderstandingResult:
         """
@@ -101,30 +103,38 @@ class Qwen3VLProcessor(VideoProcessor):
     def _build_prompt(self, segment: VideoSegment) -> str:
         """构建提示词"""
         duration = segment.end_time - segment.start_time
-        prompt = f"""请仔细分析这段实验室视频（时长约 {duration:.1f} 秒），并记录所有观察到的事件。
+        prompt = f"""请分析这段实验室视频（时长约 {duration:.1f} 秒），并记录所有观察到的事件。
 
-**重要要求**：
-1. **必须使用视频画面左上角的时间戳水印**：视频画面左上角有 "Time: HH:MM:SS" 格式的时间戳水印（OCR-B字体），这是视频的绝对时间，必须使用此时间戳作为事件的 start_time 和 end_time
-2. **时间戳格式转换**：水印格式为 "Time: HH:MM:SS"（24小时制），请将其转换为 ISO 8601 格式（如 "2025-12-17T10:00:00"）。如果无法确定日期，使用今天的日期
-3. **如果水印不可见或模糊**：才使用相对时间（基于视频开始时间）
-4. **必须记录所有人物出现和动作**：即使只是人物走进画面、坐下、操作手机或电脑，也要记录为事件
-5. **观察人物外观特征**：衣服颜色、头发颜色等
-6. **记录设备和药品的使用情况**：任何设备操作都要记录
+**任务要求**：
+1. 识别视频中的人物动作（使用了什么设备或工具或化学品）、设备运转状态，和相应的时间范围，记录为事件。
+2. 关于时间
+    - 根据视频画面左上角的时间戳水印 "yyyy-MM-dd Time: HH:MM:SS" 来判断时间。
+    - 如果时间戳水印缺少日期，则使用2025-12-22作为日期。
+3. 关于事件划分
+    - 如果有多个人同时出现，将每个人的动作分开记录为事件。
+    - 一个设备，如果有显示数值且似乎与人物动作无关，要单独记录为一个事件。
+    - 没有显示数值且不被操作的设备，不记录为事件。
+    - 不同人物或设备的事件的时间可以交叠，但同一人物或设备的事件时间不能交叠。
+    - 同一个人的一些连续的人物事件，如果涉及同一个设备或没有涉及设备，要合并为一个事件。
+4. 关于内容描述
+    - 如果无法判断是什么设备或工具或化学品，就描述它的外观特征，如颜色、形状、大小等。
+    - 描述设备仪表或设备显示屏上的数值及其变化，如果不清晰，则不描述具体数值。
+    - 不描述手机和笔记本电脑显示屏上的内容。
 
 **输出格式**：必须以 JSON 格式输出，包含以下字段：
 - event_id: 唯一事件 ID（格式：evt_001, evt_002...）
 - start_time: 事件开始时间（ISO 格式，如 "2025-12-17T10:00:00"）
 - end_time: 事件结束时间（ISO 格式）
+- event_type: 事件类型（字符串，如"person"、"equipment-only"）
 - structured: 结构化数据对象
-  - person: 人物信息对象
-    - present: 是否有人（布尔值，true/false）
-    - clothing_color: 衣服颜色（字符串，如"白色"、"蓝色"等）
-    - hair_color: 头发颜色（字符串，可选）
-  - action: 动作描述（字符串，如"走进画面"、"操作仪器"、"坐下"、"操作手机"等）
-  - equipment: 使用的设备（字符串，可选，如"离心机"、"电脑"等）
-  - chemicals: 使用的药品（字符串，可选）
-  - remark: 备注（字符串，可选）
-- raw_text: 事件的自然语言描述（字符串）
+  - person: "person"事件中的对象人物
+    - upper_clothing_color: 上衣颜色（字符串，可选，如"白色"、"蓝色"等，敏感信息，不可在其他字段中提及）
+    - hair_color: 头发颜色（字符串，可选，敏感信息，不可在其他字段中提及）
+    - action: 人物动作的简短描述（字符串，如"走进画面"、"操作设备"、"坐下"、"看手机"等）
+  - equipment: "person"事件中对象人物使用的设备，或"equipment-only"事件中对象设备（字符串，可选，如"离心机"、"笔记本电脑"等）
+  - tool: 对象人物使用的工具（字符串，可选，如“钳子”、“螺丝刀”、“镊子”等）
+  - chemicals: 对象人物使用的化学品（字符串，可选，如“氧化铅”、“白色粉末”、“无水乙醇”、“无色液体”等）
+- raw_text: 事件的自然语言描述，不提及具体时间和人物上衣颜色、头发颜色（字符串）
 
 **输出示例**：
 {{
@@ -132,51 +142,78 @@ class Qwen3VLProcessor(VideoProcessor):
     {{
       "event_id": "evt_001",
       "start_time": "2025-12-17T10:00:00",
-      "end_time": "2025-12-17T10:00:15",
+      "end_time": "2025-12-17T10:00:20",
+      "event_type": "person",
       "structured": {{
         "person": {{
-          "present": true,
-          "clothing_color": "白色",
-          "hair_color": "黑色"
+          "upper_clothing_color": "白色",
+          "hair_color": "黑色",
+          "action": "看手机"
         }},
-        "action": "走进画面",
-        "remark": "人物从画面左侧进入"
+        "equipment": "手机"
       }},
-      "raw_text": "一名人员在 10:00:00 走进画面"
+      "raw_text": "对象人物坐在一张黑色椅子上，面向离心机，正在看手机屏幕。"
     }},
     {{
-      "event_id": "evt_002",
-      "start_time": "2025-12-17T10:00:15",
-      "end_time": "2025-12-17T10:01:00",
+    "event_id": "evt_002",
+      "start_time": "2025-12-17T10:00:00",
+      "end_time": "2025-12-17T10:00:10",
+      "event_type": "equipment-only",
       "structured": {{
-        "person": {{
-          "present": true,
-          "clothing_color": "白色"
-        }},
-        "action": "操作仪器",
         "equipment": "离心机"
       }},
-      "raw_text": "人员在 10:00:15 开始操作离心机，持续约 45 秒"
+      "raw_text": "离心机上的一个示数在20附近变化，另一个示数固定在19.5。"
+    }},
+    {{
+      "event_id": "evt_003",
+      "start_time": "2025-12-17T10:00:08",
+      "end_time": "2025-12-17T10:00:10",
+      "event_type": "person",
+      "structured": {{
+        "person": {{
+          "upper_clothing_color": "橙色",
+          "hair_color": "黑色",
+          "action": "走进画面"
+        }}
+      }},
+      "raw_text": "对象人物从左侧走进画面，走到离心机旁。"
+    }},
+    {{
+      "event_id": "evt_004",
+      "start_time": "2025-12-17T10:00:10",
+      "end_time": "2025-12-17T10:00:56",
+      "event_type": "person",
+      "structured": {{
+        "person": {{
+          "upper_clothing_color": "橙色",
+          "hair_color": "黑色",
+          "action": "操作设备"
+        }},
+        "equipment": "离心机"
+      }},
+      "raw_text": "对象人物把一些离心管放入离心机。随后点击这台离心机面板上的按钮，离心机上的一个示数从20变化到大约30，另一个示数保持为19.5。"
+    }},
+    {{
+      "event_id": "evt_005",
+      "start_time": "2025-12-17T10:00:20",
+      "end_time": "2025-12-17T10:00:56",
+      "event_type": "person",
+      "structured": {{
+        "person": {{
+          "upper_clothing_color": "白色",
+          "hair_color": "黑色",
+          "action": "观察"
+        }}
+      }},
+      "raw_text": "对象人物站起来，放下手机，观察另一个人物操作离心机。"
     }}
   ]
 }}
 
-**特别注意**：
-- 即使视频中只有人物出现、移动、坐下等简单动作，也要记录为事件
-- 如果人物走出画面，也要记录为事件
-- 如果人物回到画面，也要记录为新事件
-- 必须输出有效的 JSON 格式，不能返回空的事件列表（除非视频中真的没有任何内容）
-
 **数据安全要求**：
-- `structured.person.clothing_color`（衣服颜色）和 `structured.person.hair_color`（头发颜色）字段在后续流程中会被加密存储
-- **严禁**将这些敏感信息（衣服颜色、头发颜色）写入其他未加密字段，包括：
-  - `raw_text` 字段
-  - `structured.remark` 字段
-  - `structured.action` 字段
-  - 任何其他字段
-- 如果将这些信息写入未加密字段，会导致敏感信息泄露，因为未加密字段可以被任何人查看
-- 在 `raw_text` 中描述事件时，应使用通用描述（如"一名人员"、"穿工作服的人员"），而不要提及具体的颜色信息
-- 颜色信息只能且必须放在 `structured.person.clothing_color` 和 `structured.person.hair_color` 字段中"""
+- `structured.person.upper_clothing_color`（上衣颜色）和 `structured.person.hair_color`（头发颜色）字段在后续流程中会被加密存储
+- **严禁**将这些敏感信息（上衣颜色、头发颜色）写入非加密字段，尤其是`raw_text`字段，否则会导致敏感信息泄露。
+"""
         return prompt
     
     def _parse_response(self, response_text: str, segment: VideoSegment) -> List[EventLog]:
@@ -233,13 +270,18 @@ class Qwen3VLProcessor(VideoProcessor):
                     # 使用分段 ID 作为前缀，确保不同分段的事件 ID 唯一
                     event_id = f"{segment.segment_id}_{original_event_id}"
                     
+                    # 提取 event_type（作为独立字段，不放入 structured）
+                    event_type = event_data.get('event_type')
+                    structured = event_data.get('structured', {})
+                    
                     # 构建 EventLog
                     event_log = EventLog(
                         event_id=event_id,
                         segment_id=segment.segment_id,
                         start_time=start_time,
                         end_time=end_time,
-                        structured=event_data.get('structured', {}),
+                        event_type=event_type,
+                        structured=structured,
                         raw_text=event_data.get('raw_text', '')
                     )
                     events.append(event_log)

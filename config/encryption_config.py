@@ -19,7 +19,7 @@ class EncryptionConfig:
     
     # 需要加密的字段路径列表（JSON 路径）
     ENCRYPTED_FIELDS: Set[str] = {
-        "person.clothing_color",
+        "person.upper_clothing_color",
         "person.hair_color",
         # 可以扩展更多字段
     }

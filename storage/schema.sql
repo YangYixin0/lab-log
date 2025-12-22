@@ -23,11 +23,13 @@ CREATE TABLE IF NOT EXISTS logs_raw (
     segment_id VARCHAR(64) NOT NULL,
     start_time DATETIME NOT NULL COMMENT '事件开始时间（来自画面水印）',
     end_time DATETIME NOT NULL COMMENT '事件结束时间',
+    event_type VARCHAR(32) COMMENT '事件类型，如 "person"、"equipment-only"',
     structured JSON COMMENT '结构化数据（字段级加密）',
     raw_text TEXT COMMENT '明文文本（用于检索和嵌入）',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_segment (segment_id),
     INDEX idx_time (start_time, end_time),
+    INDEX idx_event_type (event_type),
     FULLTEXT INDEX idx_fts_text (raw_text) WITH PARSER ik COMMENT '全文索引'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

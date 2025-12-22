@@ -51,8 +51,8 @@ class SeekDBClient:
         
         sql = """
             INSERT INTO logs_raw (event_id, segment_id, start_time, end_time, 
-                                 structured, raw_text)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                                 event_type, structured, raw_text)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         
         try:
@@ -66,6 +66,7 @@ class SeekDBClient:
                         event_log.segment_id,
                         event_log.start_time,
                         event_log.end_time,
+                        event_log.event_type,
                         structured_json,
                         event_log.raw_text
                     )
