@@ -14,12 +14,15 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.media.AudioManager
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.media.ToneGenerator
 import android.media.MediaMuxer
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.util.Rational
 import android.util.Size as AndroidSize
@@ -102,10 +105,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -117,7 +125,12 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.min
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.camera.core.Preview as CameraXPreview
 import androidx.compose.ui.tooling.preview.Preview as ComposablePreview
 
@@ -168,6 +181,13 @@ data class ResolutionOption(
     val height: Int,
     val format: String,
     val lensFacing: String
+)
+
+data class QrDetection(
+    val userId: String,
+    val content: String,
+    val confidence: Float,
+    val detectedAtMs: Long
 )
 
 data class ClientCapabilities(
@@ -672,6 +692,7 @@ class H264Encoder(
         private set
     var encoderFps: Int = 0
         private set
+    private var encoderColorFormat: Int = MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
 
     fun start(width: Int, height: Int, bitrate: Int, targetFps: Int) {
         encoderWidth = width
@@ -696,9 +717,15 @@ class H264Encoder(
         try {
             mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
                 configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                // 记录实际生效的输入色彩格式（硬件可能忽略请求值）
+                encoderColorFormat = this.inputFormat?.getInteger(MediaFormat.KEY_COLOR_FORMAT)
+                    ?: MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
                 start()
             }
-            Log.d(TAG, "H.264 Encoder started successfully")
+            Log.d(
+                TAG,
+                "H.264 Encoder started successfully, colorFormat=$encoderColorFormat"
+            )
             
             // 如果使用MP4Muxer，启动第一个分段
             mp4Muxer?.startSegment(width, height, encoderFps)
@@ -719,7 +746,12 @@ class H264Encoder(
         val codec = mediaCodec ?: return
         try {
             // 将整帧转换和编码过程都放在 try 中，防止异常向外抛出导致 Analyzer 中断
-            val yuvBytes = image.toNv12ByteArray(cropRect, rotationDegrees, timestamp, charWidth, charHeight)
+            val nv12Bytes = image.toNv12ByteArray(cropRect, rotationDegrees, timestamp, charWidth, charHeight)
+            val yuvBytes = if (encoderColorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar) {
+                nv12ToI420(nv12Bytes, cropRect.width(), cropRect.height())
+            } else {
+                nv12Bytes
+            }
 
             val inputBufferIndex = codec.dequeueInputBuffer(10000) // 10ms timeout
             if (inputBufferIndex >= 0) {
@@ -849,7 +881,7 @@ object OcrBFontRenderer {
     private var preloadCompleted = false
     
     // 需要预加载的字符集（时间戳 "YYYY-MM-DDTHH:mm:ss" 所需）
-    private const val PRELOAD_CHARS = "0123456789-:Time"
+    private const val PRELOAD_CHARS = "0123456789-: Time"
     
     /**
      * 初始化字体渲染器，加载 OCR-B 字体
@@ -1148,6 +1180,21 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
     private var cachedTimestamp: String = ""
     @Volatile
     private var cachedTimestampSecond: Long = -1
+    private val qrScanner by lazy {
+        BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build()
+        )
+    }
+    private val qrExecutor = Executors.newSingleThreadExecutor()
+    private val qrCache = ConcurrentHashMap<String, QrDetection>()
+    private val qrScanInFlight = AtomicBoolean(false)
+    private var lastQrSampleMs: Long = 0L
+    private val qrToneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
+    private var lastToneUser: String? = null
+    private var lowLightHits: Int = 0
+    private var lastHintAtMs: Long = 0L
     
     init {
         // 初始化 OCR-B 字体渲染器
@@ -1285,6 +1332,21 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * 将 ImageAnalysis 目标分辨率限制在不高于 1280x720，同时保持原始宽高比。
+     */
+    private fun clampResolution(size: AndroidSize, maxWidth: Int = 1280, maxHeight: Int = 720): AndroidSize {
+        val width = size.width.toDouble()
+        val height = size.height.toDouble()
+        val scale = min(1.0, min(maxWidth / width, maxHeight / height))
+        val newWidth = (width * scale).toInt().coerceAtLeast(1)
+        val newHeight = (height * scale).toInt().coerceAtLeast(1)
+        // 确保为偶数，便于后续 NV12 对齐
+        val evenWidth = if (newWidth % 2 == 0) newWidth else newWidth - 1
+        val evenHeight = if (newHeight % 2 == 0) newHeight else newHeight - 1
+        return AndroidSize(evenWidth, evenHeight)
+    }
+
     fun onUrlChange(newUrl: String) {
         _uiState.update { it.copy(url = newUrl) }
     }
@@ -1362,9 +1424,10 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
                 val cameraProvider = cameraProviderFuture.get()
                 val maxResolution = getMaxSupportedResolution(facing)
+                val cappedResolution = clampResolution(maxResolution)
 
                 val tempAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(maxResolution)
+                    .setTargetResolution(cappedResolution)
                     .setTargetRotation(Surface.ROTATION_0)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
@@ -1500,6 +1563,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 lastFrameSentTimeNs = 0L
                 droppedFrames = 0
                 encoderStarted = false
+                resetQrState()
 
                 // 创建MP4SegmentMuxer（使用var以便在回调中引用）
                 var mp4Muxer: MP4SegmentMuxer? = null
@@ -1553,14 +1617,18 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                 // - 服务器看到的编码分辨率严格按命令宽高比（例如 4:3 时得到 1920x1440，而不是 640x480）。
                 val currentFacing = _selectedCameraFacing.value
                 val maxResolution = getMaxSupportedResolution(currentFacing)
+                val targetAnalysisResolution = AndroidSize(
+                    requestedWidth.coerceAtLeast(2),
+                    requestedHeight.coerceAtLeast(2)
+                )
                 Log.d(
                     TAG,
-                    "ImageAnalysis targetResolution (max, facing=$currentFacing): ${maxResolution.width}x${maxResolution.height}, requestedAspectRatio=${aspectRatio.numerator}:${aspectRatio.denominator}"
+                    "ImageAnalysis targetResolution (requested), facing=$currentFacing: ${targetAnalysisResolution.width}x${targetAnalysisResolution.height}, raw max=${maxResolution.width}x${maxResolution.height}, requestedAspectRatio=${aspectRatio.numerator}:${aspectRatio.denominator}"
                 )
 
                 val analysisBuilder = ImageAnalysis.Builder()
-                    .setTargetResolution(maxResolution) // 始终请求硬件支持的最大 YUV_420_888 分辨率
-                    .setTargetRotation(Surface.ROTATION_0) // 固定 0，避免 HAL 旋转叠加导致的平面错位
+                    .setTargetResolution(targetAnalysisResolution) // 与编码目标保持一致的宽高比和分辨率
+                    .setTargetRotation(targetRotation) // 与 Preview 同步，让 HAL 统一旋转
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
 
                 // 暂停 HAL 级旋转裁剪，先验证纯手动裁剪 + 固定旋转 0 是否消除条纹/绿带
@@ -1612,7 +1680,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                         val physicalRotation = _devicePhysicalRotation.value
                                         val currentFacing = _selectedCameraFacing.value
                                         // 计算需要旋转的角度（用于 Android 端旋转）
-                                        val rotationDegreesForAndroid = calculateRotationForBackend(physicalRotation, currentFacing)
+                                    // 使用 CameraX 提供的旋转角度对 NV12 进行旋转，保持画面方向正确
+                                    val rotationDegreesForAndroid = imageProxy.imageInfo.rotationDegrees
 
                                         // 计算旋转后的图像尺寸
                                         val (rotatedWidth, rotatedHeight) = getRotatedDimensions(
@@ -1675,6 +1744,8 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                                         }
                                     }
                                 }
+                                // 独立的二维码采样，不影响编码分辨率
+                                maybeScanQr(imageProxy)
                             } catch (e: Exception) {
                                 Log.e(TAG, "Analyzer error while encoding frame", e)
                             } finally {
@@ -1718,6 +1789,7 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             requestedFps = 0
             lastFrameSentTimeNs = 0L
             droppedFrames = 0
+            resetQrState()
 
             _uiState.update { it.copy(isStreaming = false, statusMessage = "Stream stopped") }
             if(_uiState.value.isConnected) {
@@ -1757,6 +1829,30 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 // Base64编码MP4数据
                 val base64Data = android.util.Base64.encodeToString(mp4Data, android.util.Base64.NO_WRAP)
+
+                val qrArray = JSONArray()
+                // 使用快照避免与扫描线程并发冲突
+                val qrSnapshot = qrCache.values.toList()
+                val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.getDefault())
+                qrSnapshot.forEach { qr ->
+                    val detectedIso = try {
+                        sdf.format(Date(qr.detectedAtMs))
+                    } catch (_: Exception) {
+                        qr.detectedAtMs.toString()
+                    }
+                    val obj = JSONObject()
+                        .put("confidence", qr.confidence)
+                        .put("detected_at_ms", qr.detectedAtMs)
+                        .put("detected_at", detectedIso)
+                    try {
+                        val parsed = JSONObject(qr.content)
+                        parsed.optString("user_id").takeIf { it.isNotBlank() }?.let { obj.put("user_id", it) }
+                        parsed.optString("public_key_fingerprint").takeIf { it.isNotBlank() }?.let { obj.put("public_key_fingerprint", it) }
+                    } catch (_: Exception) {
+                        // 非 JSON 内容，忽略解析错误
+                    }
+                    qrArray.put(obj)
+                }
                 
                 // 构造JSON消息
                 val message = JSONObject().apply {
@@ -1764,10 +1860,13 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
                     put("segment_id", segmentId)
                     put("data", base64Data)
                     put("size", mp4Data.size)
+                    put("qr_results", qrArray)
                 }.toString()
                 
                 webSocket?.send(message)
                 Log.d(TAG, "--> Sent MP4 segment: $segmentId, size=${mp4Data.size} bytes")
+                // 发送后清空当前分段缓存，准备下一分段聚合
+                resetQrState()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send MP4 segment: $segmentId", e)
                 // 发送错误状态
@@ -1859,6 +1958,12 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         super.onCleared()
         disconnect()
         cameraExecutor.shutdown()
+        qrExecutor.shutdown()
+        try {
+            qrToneGenerator.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to release ToneGenerator", e)
+        }
     }
 
     private fun shouldSendFrame(targetFps: Int): Boolean {
@@ -1873,6 +1978,136 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
             return true
         }
         return false
+    }
+
+    private fun shouldSampleQr(nowMs: Long, intervalMs: Long = 300L): Boolean {
+        if (qrScanInFlight.get()) return false
+        if (nowMs - lastQrSampleMs < intervalMs) return false
+        lastQrSampleMs = nowMs
+        return true
+    }
+
+    private fun playToneForUser(userId: String, isHigherConfidence: Boolean) {
+        if (lastToneUser != userId || isHigherConfidence) {
+            // 切换到主线程播放提示音，确保音频系统正常工作
+            viewModelScope.launch(Dispatchers.Main) {
+                try {
+                    qrToneGenerator.startTone(ToneGenerator.TONE_PROP_ACK, 150)
+                    Log.d(TAG, "QR: Played tone for user: $userId")
+                } catch (e: Exception) {
+                    Log.w(TAG, "QR: Failed to play tone", e)
+                }
+            }
+            lastToneUser = userId
+        }
+    }
+
+    private fun showQrHint(hint: String, ttlMs: Long = 1500L, minIntervalMs: Long = 500L) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastHintAtMs < minIntervalMs && _uiState.value.qrHint == hint) {
+            return
+        }
+        lastHintAtMs = now
+        _uiState.update { it.copy(qrHint = hint) }
+        viewModelScope.launch(Dispatchers.Main) {
+            delay(ttlMs)
+            _uiState.update { state ->
+                if (state.qrHint == hint) state.copy(qrHint = null) else state
+            }
+        }
+    }
+
+    private fun computeQrConfidence(barcode: Barcode): Float {
+        val box = barcode.boundingBox ?: return 0.0f
+        val area = box.width().toFloat() * box.height().toFloat()
+        return area.coerceAtLeast(0f)
+    }
+
+    private fun maybeScanQr(imageProxy: ImageProxy) {
+        val now = SystemClock.elapsedRealtime()
+        if (!shouldSampleQr(now)) return
+        qrScanInFlight.set(true)
+
+        // 将当前帧复制为 NV21，避免阻塞 CameraX 管线
+        val nv21 = try {
+            imageProxy.toNv21ByteArray()
+        } catch (e: Exception) {
+            Log.w(TAG, "QR: failed to copy NV21", e)
+            qrScanInFlight.set(false)
+            return
+        }
+        val width = imageProxy.width
+        val height = imageProxy.height
+        val rotation = imageProxy.imageInfo.rotationDegrees
+
+        qrExecutor.execute {
+            val input = InputImage.fromByteArray(
+                nv21,
+                width,
+                height,
+                rotation,
+                InputImage.IMAGE_FORMAT_NV21
+            )
+            qrScanner
+                .process(input)
+                .addOnSuccessListener { barcodes ->
+                    if (barcodes.isEmpty()) {
+                        lowLightHits++
+                        if (lowLightHits >= 3) {
+                            showQrHint("请补光/保持稳定")
+                            lowLightHits = 0
+                        }
+                        return@addOnSuccessListener
+                    }
+                    lowLightHits = 0
+                    barcodes.forEach { code ->
+                        val content = code.rawValue ?: return@forEach
+                        val dedupKey = try {
+                            val obj = JSONObject(content)
+                            val uid = obj.optString("user_id", "")
+                            val fp = obj.optString("public_key_fingerprint", "")
+                            if (uid.isNotBlank() || fp.isNotBlank()) {
+                                "uid=$uid|fp=$fp"
+                            } else {
+                                content
+                            }
+                        } catch (_: Exception) {
+                            content
+                        }
+                        val confidence = computeQrConfidence(code)
+                        val detectedAt = System.currentTimeMillis()
+                        qrCache.compute(dedupKey) { _, prev ->
+                            val shouldReplace = prev == null || confidence > prev.confidence
+                            if (shouldReplace) {
+                                playToneForUser(dedupKey, prev != null)
+                                showQrHint("已识别用户")
+                                QrDetection(
+                                    userId = dedupKey,
+                                    content = content,
+                                    confidence = confidence,
+                                    detectedAtMs = detectedAt
+                                )
+                            } else {
+                                prev
+                            }
+                        }
+                    }
+                }
+                .addOnFailureListener { e ->
+                    Log.w(TAG, "QR scan failed", e)
+                }
+                .addOnCompleteListener {
+                    qrScanInFlight.set(false)
+                }
+        }
+    }
+
+    private fun resetQrState() {
+        qrCache.clear()
+        lastToneUser = null
+        lowLightHits = 0
+        qrScanInFlight.set(false)
+        _uiState.update { it.copy(qrHint = null) }
     }
 
     private fun formatFpsLabel(fpsValue: Int): String {
@@ -2036,6 +2271,64 @@ class WebSocketViewModel(application: Application) : AndroidViewModel(applicatio
         val safeHeight = alignedHeight.coerceAtLeast(2).let { if (it % 2 != 0) it - 1 else it }
         return Rect(0, 0, safeWidth, safeHeight)
     }
+}
+
+/**
+ * 将 ImageProxy 转换为 NV21（Y + 交错 VU），供 ML Kit 使用。
+ * 不做裁剪或缩放，尽量减少额外开销。
+ */
+@SuppressLint("UnsafeOptInUsageError")
+fun ImageProxy.toNv21ByteArray(): ByteArray {
+    val yPlane = planes[0].buffer.duplicate()
+    val uPlane = planes[1].buffer.duplicate()
+    val vPlane = planes[2].buffer.duplicate()
+
+    val ySize = yPlane.remaining()
+    val nv21 = ByteArray(ySize + width * height / 2)
+    yPlane.get(nv21, 0, ySize)
+
+    val chromaHeight = height / 2
+    val chromaWidth = width / 2
+    val uRowStride = planes[1].rowStride
+    val vRowStride = planes[2].rowStride
+    val uPixelStride = planes[1].pixelStride
+    val vPixelStride = planes[2].pixelStride
+
+    var outputOffset = ySize
+    for (row in 0 until chromaHeight) {
+        var uIndex = row * uRowStride
+        var vIndex = row * vRowStride
+        for (col in 0 until chromaWidth) {
+            nv21[outputOffset++] = vPlane.get(vIndex)
+            nv21[outputOffset++] = uPlane.get(uIndex)
+            uIndex += uPixelStride
+            vIndex += vPixelStride
+        }
+    }
+    return nv21
+}
+
+/**
+ * 将 NV12 转为 I420（Y + U + V 平面），用于只支持 YUV420Planar 的编码器。
+ */
+fun nv12ToI420(nv12: ByteArray, width: Int, height: Int): ByteArray {
+    val ySize = width * height
+    val uvSize = ySize / 4
+    val i420 = ByteArray(ySize + uvSize * 2)
+    // Y 平面
+    System.arraycopy(nv12, 0, i420, 0, ySize)
+    // NV12 的 UV 交错：UV UV ...
+    var src = ySize
+    var uDst = ySize
+    var vDst = ySize + uvSize
+    while (src + 1 < nv12.size && vDst < i420.size) {
+        val u = nv12[src].toInt()
+        val v = nv12[src + 1].toInt()
+        i420[uDst++] = u.toByte()
+        i420[vDst++] = v.toByte()
+        src += 2
+    }
+    return i420
 }
 
 /**
@@ -2262,7 +2555,8 @@ data class WebSocketUiState(
     val url: String = "ws://39.98.165.184:50002/android-cam",
     val isConnected: Boolean = false,
     val isStreaming: Boolean = false,
-    val statusMessage: String = "Disconnected"
+    val statusMessage: String = "Disconnected",
+    val qrHint: String? = null
 )
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -2565,7 +2859,16 @@ fun MainContent(
                         .clip(CircleShape)
                         .background(if (uiState.isStreaming) Color.Green else Color.Gray)
                 )
-                Text(text = uiState.statusMessage)
+                Column {
+                    Text(text = uiState.statusMessage)
+                    uiState.qrHint?.let {
+                        Text(
+                            text = it,
+                            color = Color(0xFFf5a623),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
             }
             Switch(
                 checked = uiState.isConnected,

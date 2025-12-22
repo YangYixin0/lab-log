@@ -7,6 +7,7 @@
 ### 核心特性
 
 - **视频理解**：使用 Qwen3-VL Flash 视觉大模型分析实验室视频，自动识别人物动作、设备操作等信息
+- **二维码识别**：Android 采集端实时识别用户二维码，自动关联用户身份与视频片段
 - **结构化日志**：将视频内容转换为带时间戳的结构化事件日志
 - **字段级加密**：支持对敏感字段（如人物外观特征）进行加密，使用混合加密方案（AES-GCM + RSA-OAEP）
 - **向量检索**：支持日志的向量嵌入和语义搜索，便于后续的智能查询和分析
@@ -57,7 +58,8 @@
 
 1) **实时处理（Android 采集端 → WebSocket 服务器）**
    - Android 端用 MediaCodec 编码 H.264，并在关键帧前附带完整 SPS/PPS（关键经验：给 IDR 帧前置 SPS/PPS，保证每段 MP4 可独立解码），使用 MediaMuxer 生成小 MP4 分段，通过 WebSocket 发送到服务器。
-   - 服务器 `streaming_server` 接收 Base64 MP4 文本消息，落盘到 `recordings/`，按环境开关决定是否实时处理和索引。
+   - **二维码识别**：采集过程中使用 ML Kit 实时识别用户二维码，按分段聚合识别结果（同一用户保留最高置信度），随 MP4 分段元数据一起上报。识别成功时播放提示音并在预览层显示提示。
+   - 服务器 `streaming_server` 接收 Base64 MP4 文本消息（包含二维码识别结果），落盘到 `recordings/`，按环境开关决定是否实时处理和索引。
    - 处理管线：VideoLogPipeline → 写入 logs_raw（加密字段）+ 可选索引 logs_embedding → 生成缩略图 → 单行 Realtime 日志输出。
 
 2) **离线处理（已有 MP4 文件）**
@@ -374,6 +376,21 @@ Enter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'):
 **停止服务器**：
 - 按 `Ctrl+C` 停止服务器
 
+**测试服务器（仅用于验证二维码识别功能）**：
+
+如果只需要测试二维码识别功能，可以使用轻量级的测试服务器：
+
+```bash
+# 启动测试服务器（端口 50003）
+python streaming_server/test_qr_server.py
+```
+
+测试服务器功能：
+- 接收 MP4 分段并保存到 `qr_test_segments/` 目录
+- 打印收到的二维码识别结果（`qr_results`）
+- 支持终端命令控制（`start` / `stop`）
+- **不进行视频处理**，仅用于验证二维码识别和上报功能
+
 ### 7. 处理视频（离线处理）
 
 处理已录制的 MP4 视频文件：
@@ -507,7 +524,8 @@ python scripts/clear_test_data.py
 ```
 lab-log/
 ├── streaming_server/    # WebSocket 流媒体服务器
-│   ├── server.py            # WebSocket 服务器（接收H264流）
+│   ├── server.py            # WebSocket 服务器（接收MP4分段，实时处理）
+│   ├── test_qr_server.py    # 测试服务器（仅接收和保存MP4分段，打印二维码识别结果）
 │   ├── h264_parser.py       # H264流解析器（关键帧检测）
 │   └── monitoring.py        # 监控和统计模块
 ├── web_api/            # FastAPI RESTful API
@@ -653,6 +671,25 @@ ORDER BY score DESC
 LIMIT 10;
 ```
 
+### 5. 查看二维码识别结果
+
+二维码识别结果随 MP4 分段一起上报，格式为 `qr_results` 数组。每个结果包含：
+- `user_id`：用户 ID（从二维码 JSON 中解析）
+- `public_key_fingerprint`：公钥指纹（从二维码 JSON 中解析）
+- `confidence`：置信度（基于二维码边界框面积）
+- `detected_at_ms`：检测时间戳（毫秒，绝对时间）
+- `detected_at`：检测时间戳（ISO 格式文本）
+
+**在测试服务器中查看**：
+```bash
+# 启动测试服务器后，识别结果会直接打印到终端
+python streaming_server/test_qr_server.py
+```
+
+**在流媒体服务器中查看**：
+- 二维码识别结果会包含在 MP4 分段的元数据中
+- 可以通过日志或数据库查询查看关联的用户信息
+
 ## 技术栈
 
 ### 后端
@@ -666,6 +703,15 @@ LIMIT 10;
 - **ffmpeg/ffprobe**：视频处理和分段
 - **Cryptography**：混合加密（AES-GCM + RSA-OAEP）
 - **bcrypt**：密码哈希加密
+
+### Android 采集端
+
+- **Kotlin**：主要开发语言
+- **CameraX**：相机框架，支持 Preview 和 ImageAnalysis
+- **MediaCodec**：H.264 硬件编码
+- **MediaMuxer**：MP4 封装
+- **ML Kit Barcode Scanning**：二维码识别（版本 17.3.0+，支持 16KB 页面大小）
+- **OkHttp**：WebSocket 客户端
 
 ### 前端
 
@@ -708,4 +754,27 @@ LIMIT 10;
 7. **实时采集编码注意**：Android 端为每个关键帧前置完整 SPS/PPS（启用 `MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES`），保证分段 MP4 独立可解码，避免因缺少 PPS 导致封装/播放失败。
 
 8. **字段名变更**：数据库字段名已从 `encrypted_structured` 改为 `structured`，新初始化的数据库使用新字段名
+
+9. **二维码识别功能**：
+   - Android 端使用 ML Kit 条码扫描（版本 17.3.0+，支持 16KB 页面大小）实时识别用户二维码
+   - 二维码内容应为 JSON 格式，包含 `user_id` 和 `public_key_fingerprint` 字段
+   - 识别结果按分段聚合，同一用户（基于 user_id + public_key_fingerprint）在同一分段内只保留置信度最高的结果
+   - 识别结果随 MP4 分段元数据一起上报，格式为 `qr_results` 数组，包含 `user_id`、`public_key_fingerprint`、`confidence`、`detected_at_ms`、`detected_at` 字段
+   - 识别成功时播放系统提示音并在预览层显示"已识别用户"提示
+
+10. **画面条纹问题解决经验**：
+    - **问题现象**：竖屏采集时视频画面出现绿色/紫色条纹
+    - **根本原因**：编码器输入色彩格式不匹配。某些设备（如 Pixel 6a）的硬件编码器实际使用 `COLOR_FormatYUV420Planar`（I420，分离 U/V 平面），而代码一直提供 NV12（半平面，交错 UV），导致 UV 平面错位
+    - **解决方案**：
+      1. 检测编码器实际输入色彩格式（从 MediaCodec outputFormat 获取）
+      2. 如果为 Planar 格式，在送入编码器前将 NV12 转换为 I420
+      3. 使用 CameraX 的实际帧时间戳（`image.imageInfo.timestamp`）而非固定间隔，确保视频时间轴准确
+      4. ImageAnalysis 和 Preview 使用相同的 `targetRotation`（displayRotation），让 HAL 统一处理旋转，避免双重旋转导致平面错位
+    - **关键代码**：`H264Encoder.encode()` 中根据 `encoderColorFormat` 动态选择 NV12 或 I420 格式
+    - **额外收益**：使用真实帧时间戳后，视频 FPS 反映实际捕获速率（可能为非整数），播放速度与现实时间完美对齐
+
+11. **16KB 页面大小兼容性**：
+    - Android 15+ 要求所有原生库（.so 文件）对齐到 16KB 页面大小
+    - ML Kit 17.3.0+ 已支持 16KB 对齐，使用该版本可避免兼容性警告
+    - 在 `build.gradle.kts` 中设置 `packaging.jniLibs.useLegacyPackaging = false` 确保正确打包
 

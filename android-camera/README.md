@@ -1,8 +1,8 @@
 # Lab Log Android Camera（手机采集视频并推流）
 
-这是一个将 Android 手机当作“网络相机”的小项目：  
-手机端使用 CameraX + MediaCodec 采集并编码 H.264 视频，通过 WebSocket 推送到 Python 服务器；  
-服务器按会话把裸流落盘，并在录制结束时用 `ffmpeg` 封装成 MP4 文件。
+手机端使用 CameraX + MediaCodec 采集并编码 H.264 视频，使用 MediaMuxer 封装为 MP4 分段，通过 WebSocket 推送到 Python 服务器；  
+同时使用 ML Kit 实时识别用户二维码，识别结果随 MP4 分段元数据一起上报；  
+服务器接收 MP4 分段和二维码识别结果，根据配置决定是否实时处理和索引。
 
 ---
 
@@ -12,11 +12,13 @@
   - Kotlin + Jetpack Compose UI
   - CameraX 负责相机预览 + YUV 图像采集
   - MediaCodec 负责 H.264 硬件编码
+  - MediaMuxer 负责 MP4 分段封装
+  - ML Kit 负责实时二维码识别
   - OkHttp WebSocket 负责与服务器通信
 - **后端（`streaming_server/server.py`）**
   - 使用 `websockets` 库实现 WebSocket 服务器
-  - 接收来自手机的 H.264 帧，写入 `recordings/<client>/<session>/stream.h264`
-  - 根据时间戳估算 FPS，使用 `ffmpeg` 封装为 MP4
+  - 接收来自手机的 MP4 分段（包含二维码识别结果），保存到 `recordings/`
+  - 支持实时处理和索引，或仅保存视频分段
 
 数据流大致如下：
 
@@ -30,11 +32,14 @@
    - 使用 CameraX **ViewPort + UseCaseGroup** 确保预览（Preview）和采集（ImageAnalysis）的 FOV 完全一致，用户在预览中看到的画面就是发送到服务器的画面；
    - 在 `ImageAnalysis` 分析流中按需丢帧，并根据选择的宽高比进行安全尺寸裁剪（4:3/16:9 时裁剪，不裁剪时使用全帧但做 32 对齐）；
    - 根据设备物理方向和摄像头类型在 Android 端完成视频旋转，确保发送到服务器的视频已经是正确方向；
-   - 将图像编码为 H.264，通过 WebSocket 以"带自定义二进制帧头的 H.264 帧"发送给服务器；
+   - 使用 MediaCodec 编码 H.264，MediaMuxer 封装为 MP4 分段（约 60 秒），每个分段在关键帧处分割，确保独立可解码；
+   - 在 `ImageAnalysis` 中实时识别二维码（使用 ML Kit），按分段聚合识别结果（同一用户保留最高置信度），随 MP4 分段元数据一起上报；
+   - 识别成功时播放提示音并在预览层显示"已识别用户"提示；
+   - 通过 WebSocket 发送 MP4 分段（Base64 编码）及二维码识别结果；
 4. 服务器端：
-   - 收到 `capture_started` 状态时打开一个录制会话；
-   - 按帧解出时间戳和裸 H.264 数据写文件；
-   - 收到 `capture_stopped` 或连接断开时结束会话，使用 `ffmpeg` 直接封装成 MP4（无需旋转，因为视频已在 Android 端旋转完成），同时提取第一帧保存为缩略图。
+   - 接收 MP4 分段和二维码识别结果，保存到 `recordings/` 目录；
+   - 根据配置决定是否实时处理和索引视频内容；
+   - 视频已在 Android 端旋转完成，无需后端再旋转。
 
 ---
 
@@ -48,13 +53,23 @@
     - `EncodedFrame`：编码后的 H.264 帧及设备时间戳（毫秒）。
     - `ClientCapabilities` / `ResolutionOption`：设备支持的相机分辨率能力。
   - **编码器封装 `H264Encoder`**
-    - 使用 `MediaCodec` 以 `COLOR_FormatYUV420SemiPlanar`（NV12）输出 H.264。
+    - 使用 `MediaCodec` 进行 H.264 硬件编码。
+    - **色彩格式自适应**：检测编码器实际输入色彩格式，如果为 `COLOR_FormatYUV420Planar`（I420），自动将 NV12 转换为 I420；否则直接使用 NV12。
     - `start(width, height, bitrate, targetFps)`：配置编码器；`targetFps<=0` 时使用默认 10fps 作为编码参考。
     - `encode(image: ImageProxy, cropRect: Rect)`：
       - 调用扩展函数 `ImageProxy.toNv12ByteArray(cropRect)` 将 YUV_420_888 转为 NV12；
+      - 根据编码器格式要求，必要时转换为 I420；
+      - 使用实际帧时间戳（`image.imageInfo.timestamp`）而非固定间隔，确保视频时间轴准确；
       - 送入编码器，循环读取输出缓冲区；
       - 将编码好的字节及时间戳通过回调传出。
     - `stop()`：安全停止并释放编码器。
+  - **二维码识别 `QrDetection`**
+    - 使用 ML Kit Barcode Scanning（版本 17.3.0+）实时识别二维码。
+    - 在 `ImageAnalysis` 中按 300ms 间隔采样帧进行识别，避免性能开销过大。
+    - 解析二维码内容（JSON 格式），提取 `user_id` 和 `public_key_fingerprint` 用于去重。
+    - 按分段聚合识别结果，同一用户（基于 user_id + public_key_fingerprint）在同一分段内只保留置信度最高的结果。
+    - 识别成功时播放系统提示音（主线程）并在预览层显示提示。
+    - 识别结果包含：`user_id`、`public_key_fingerprint`、`confidence`、`detected_at_ms`（绝对时间戳）、`detected_at`（ISO 格式文本）。
   - **`WebSocketViewModel`（核心控制中枢）**
     - 维护 UI 状态 `WebSocketUiState`：URL、连接状态、是否在推流、状态文本。
     - WebSocket 生命周期：
@@ -80,11 +95,13 @@
         - 调用 `encoder.encode(imageProxy, cropRect)` 完成编码；
         - 所有路径最终都会在 `finally` 中 `imageProxy.close()`，避免阻塞 CameraX。
       - 编码回调中：
-        - 为每帧构造 16 字节二进制帧头（大端）：
-          - `int64 timestampMs`
-          - `int32 frameSequence`（低 32 位递增）
-          - `int32 payloadSize`
-        - 之后紧跟 H.264 裸码流，共同通过 WebSocket 发送给服务器。
+        - 使用 MediaMuxer 将编码后的 H.264 帧封装为 MP4 分段（约 60 秒，在关键帧处分割）；
+        - 每个分段包含完整的 SPS/PPS（在关键帧前置），确保独立可解码；
+        - 分段完成后，将 MP4 数据 Base64 编码，连同二维码识别结果（`qr_results` 数组）一起通过 WebSocket 发送给服务器。
+      - 二维码识别：
+        - 在 `ImageAnalysis` 分析器中按 300ms 间隔采样帧进行识别；
+        - 识别结果缓存到当前分段的去重映射中（按 user_id + public_key_fingerprint 去重，保留最高置信度）；
+        - 识别成功时播放提示音（主线程）并显示 UI 提示。
       - 更新 UI 状态 `statusMessage`，例如：`"Streaming H.264 at 1600x1200 (5fps)"`。
     - 停止推流 `stopStreaming()`：
       - 在主线程清空 Analyzer，停止相机分析；
@@ -250,21 +267,41 @@ App 在关键状态变更时发送 `ClientStatus`：
 
 服务器通过这些状态来创建 / 结束录制会话，并直接封装成 MP4（无需旋转）。
 
-### 4. 帧数据（App → Server）
+### 4. MP4 分段数据（App → Server）
 
-每一帧通过 WebSocket 以二进制方式发送，结构为：
+每个 MP4 分段（约 60 秒）通过 WebSocket 以 JSON 文本消息发送：
 
-```text
-16 字节帧头（大端） + H.264 NAL 裸码流
+```json
+{
+  "type": "mp4_segment",
+  "segment_id": "segment_001",
+  "data": "base64_encoded_mp4_data...",
+  "size": 1234567,
+  "qr_results": [
+    {
+      "user_id": "user123",
+      "public_key_fingerprint": "abc123...",
+      "confidence": 0.95,
+      "detected_at_ms": 1734901234567,
+      "detected_at": "2025-12-23T04:14:30.123+08:00"
+    }
+  ]
+}
 ```
 
-帧头具体字段：
+字段说明：
+- `type`：固定为 `"mp4_segment"`。
+- `segment_id`：分段标识符，用于区分不同分段。
+- `data`：MP4 文件的 Base64 编码数据。
+- `size`：MP4 文件大小（字节）。
+- `qr_results`：二维码识别结果数组，每个分段内按 `user_id` + `public_key_fingerprint` 去重，只保留置信度最高的结果。
+  - `user_id`：用户 ID（从二维码 JSON 中解析，可选）。
+  - `public_key_fingerprint`：公钥指纹（从二维码 JSON 中解析，可选）。
+  - `confidence`：置信度（基于二维码边界框面积计算）。
+  - `detected_at_ms`：检测时间戳（毫秒，绝对时间，与视频水印时间对齐）。
+  - `detected_at`：检测时间戳（ISO 8601 格式文本）。
 
-- `int64 timestampMs`：设备时间戳，单位毫秒（基于编码器输出 `presentationTimeUs`）。
-- `int32 frameSequence`：帧序号，低 32 位循环递增。
-- `int32 payloadSize`：后续 H.264 负载的字节数。
-
-后端的 `parse_frame_packet()` 会按同样的结构解出时间戳 / 帧号 / 负载。
+**注意**：MP4 分段已在 Android 端完成封装，包含完整的 SPS/PPS（在关键帧前置），确保每个分段独立可解码。视频已在 Android 端旋转完成，无需后端再旋转。
 
 ---
 
@@ -325,7 +362,7 @@ App 在关键状态变更时发送 `ClientStatus`：
      ```text
      [App Status] ... {"status":"capture_started","message":"Streaming H.264 at 4:3 aspect ratio, 4MB bitrate (10fps) [rotated on Android]"}
      [Info]: Started recording session at recordings/...
-     [Frame]: ... seq=0 timestamp=... size=...
+     [MP4 Segment]: segment_id=... size=... qr_results=...
      ...
      ```
 
@@ -339,15 +376,14 @@ App 在关键状态变更时发送 `ClientStatus`：
    - 服务器会结束会话并打印：
 
      ```text
-     [Info]: FPS estimate (server) frame_count=57 -> 4.81
-     [Info]: Thumbnail saved to recordings/<client>_<timestamp>/thumbnail.jpg
-     [Info]: MP4 saved to recordings/<client>_<timestamp>/stream.mp4
+     [Info]: Received X MP4 segments
+     [Info]: MP4 segments saved to recordings/<client>_<timestamp>/
      ```
 
    - 到 `streaming_server/recordings/` 目录下即可找到对应的文件夹，包含：
-     - `stream.h264`：原始 H.264 流
-     - `stream.mp4`：封装后的 MP4 视频（视频已在 Android 端旋转完成，无需后端再旋转）
-     - `thumbnail.jpg`：第一帧的缩略图（视频已在 Android 端旋转完成，无需后端再旋转）
+     - `segment_00.mp4`、`segment_01.mp4` 等：MP4 分段文件（视频已在 Android 端旋转完成，无需后端再旋转）
+     - 每个分段包含完整的 SPS/PPS，可独立解码
+     - 如果启用了二维码识别，服务器日志会显示识别结果（`qr_results`）
 
 ---
 
@@ -520,9 +556,16 @@ adb install app\build\outputs\apk\debug\app-debug.apk
    - **现象**：如果直接按宽度复制数据而忽略 stride，会导致数据错位
    - **解决方案**：在复制 YUV 数据时，必须考虑 stride，逐行复制而不是按宽度复制
 
-7. **编码器配置问题**：
-   - **问题**：如果编码器的颜色格式配置不正确，也可能导致条纹伪影
-   - **解决方案**：确保编码器配置的颜色格式与输入数据格式匹配（使用 `COLOR_FormatYUV420SemiPlanar` 对应 NV12）
+7. **编码器色彩格式不匹配**（**关键问题**）：
+   - **问题**：某些设备（如 Pixel 6a）的硬件编码器实际使用 `COLOR_FormatYUV420Planar`（I420，分离 U/V 平面），而代码一直提供 NV12（半平面，交错 UV），导致 UV 平面错位，出现绿色/紫色条纹
+   - **现象**：竖屏采集时视频画面出现绿色/紫色条纹
+   - **根本原因**：编码器输入色彩格式与提供的数据格式不匹配
+   - **解决方案**：
+     - 检测编码器实际输入色彩格式（从 MediaCodec outputFormat 获取）
+     - 如果为 Planar 格式（I420），在送入编码器前将 NV12 转换为 I420
+     - 使用 `nv12ToI420()` 函数进行格式转换
+     - ImageAnalysis 和 Preview 使用相同的 `targetRotation`（displayRotation），让 HAL 统一处理旋转
+   - **关键代码**：`H264Encoder.encode()` 中根据 `encoderColorFormat` 动态选择 NV12 或 I420 格式
 
 #### 当前实现的安全策略
 
@@ -541,9 +584,11 @@ adb install app\build\outputs\apk\debug\app-debug.apk
    - 视频旋转在 Android 端完成，通过手动旋转 YUV 数据实现，确保旋转后的数据满足 stride 和对齐要求
    - 发送到后端的视频已经是正确方向（rotation=0），无需后端再旋转
 
-3. **正确的色度格式**：
-   - 使用 NV12 格式（planes[1]=U, planes[2]=V，写入顺序 U 后 V）
-   - 编码器配置为 `COLOR_FormatYUV420SemiPlanar`
+3. **色彩格式自适应**：
+   - 检测编码器实际输入色彩格式（从 MediaCodec outputFormat 获取）
+   - 如果为 `COLOR_FormatYUV420Planar`（I420），自动将 NV12 转换为 I420
+   - 如果为 `COLOR_FormatYUV420SemiPlanar`（NV12），直接使用 NV12
+   - 使用 `nv12ToI420()` 函数进行格式转换，确保 UV 平面正确分离
 
 4. **严格的坐标对齐**：
    - 所有裁剪坐标和尺寸均为偶数
@@ -551,16 +596,115 @@ adb install app\build\outputs\apk\debug\app-debug.apk
    - 居中裁剪，确保坐标不越界
 
 > **经验总结**：
+> - **关键**：检测编码器实际输入色彩格式，如果为 Planar（I420），必须将 NV12 转换为 I420，否则会出现绿色/紫色条纹
 > - 优先使用"安全尺寸"而非精确比例，避免与编码器 stride 冲突
 > - 在 Android 端旋转时，必须正确处理 stride 和对齐要求，确保旋转后的数据满足 32/偶数对齐
+> - 使用实际帧时间戳（`image.imageInfo.timestamp`）而非固定间隔，确保视频时间轴准确，FPS 可能为非整数但播放速度与现实时间完美对齐
 > - 确保所有裁剪尺寸和坐标都满足对齐要求（32/偶数对齐）
 > - 对齐后尺寸变化时，基于原始裁剪区域的中心点重新计算位置，保留原始裁剪意图
-> - 如果遇到条纹/绿带，优先检查裁剪尺寸是否与编码器对齐要求匹配（32 的倍数且为偶数）
+> - 如果遇到条纹/绿带，优先检查：
+>   1. 编码器色彩格式是否匹配（Planar vs SemiPlanar）
+>   2. 裁剪尺寸是否与编码器对齐要求匹配（32 的倍数且为偶数）
 > - 测试时可以先使用全帧对齐（无裁剪）验证是否消除问题，再逐步缩小到目标尺寸
 
 ### 已知/已解决问题记录
-- ✅ 条纹/绿带：OPPO PBBM30 竖立/倒立时曾出现底部绿带与条纹伪影，已通过“旋转后再按目标宽高比居中裁剪并 32/偶数对齐”（`computeAlignedCropRectForRotatedFrame` + 旋转后的尺寸参与裁剪）解决，所有姿态视频已无绿带条纹。
+- ✅ **条纹/绿带（最终解决方案）**：
+  - **问题**：竖屏采集时视频画面出现绿色/紫色条纹
+  - **根本原因**：编码器输入色彩格式不匹配。某些设备（如 Pixel 6a）的硬件编码器实际使用 `COLOR_FormatYUV420Planar`（I420），而代码一直提供 NV12，导致 UV 平面错位
+  - **解决方案**：
+    1. 检测编码器实际输入色彩格式（从 MediaCodec outputFormat 获取）
+    2. 如果为 Planar 格式，在送入编码器前将 NV12 转换为 I420
+    3. ImageAnalysis 和 Preview 使用相同的 `targetRotation`（displayRotation）
+    4. 使用实际帧时间戳（`image.imageInfo.timestamp`）确保视频时间轴准确
+  - **额外收益**：使用真实帧时间戳后，视频 FPS 反映实际捕获速率（可能为非整数），播放速度与现实时间完美对齐
+- ✅ **OPPO PBBM30 条纹/绿带**：竖立/倒立时曾出现底部绿带与条纹伪影，已通过"旋转后再按目标宽高比居中裁剪并 32/偶数对齐"（`computeAlignedCropRectForRotatedFrame` + 旋转后的尺寸参与裁剪）解决，所有姿态视频已无绿带条纹。
 - ⚠️ 预览 FOV 与采集 FOV 不一致（OPPO PBBM30 左/右横时采集画面更大）：预览容器为正方形，ViewPort 默认填充行为可能在横屏时对预览做了中心裁剪，而采集使用最大可用 FOV 的裁剪结果，导致采集画面比预览更大。尝试将 ViewPort scaleType 设为 FIT 效果不明显，暂未调整代码。现状：以最大 FOV 为目标，采集画面正确；预览仍可能比采集小一圈，后续需要继续排查/调优。
+
+### 二维码识别功能
+
+#### 功能概述
+
+Android 采集端集成了实时二维码识别功能，用于识别用户身份并关联视频片段。
+
+#### 技术实现
+
+- **识别库**：ML Kit Barcode Scanning（版本 17.3.0+，支持 16KB 页面大小）
+- **识别频率**：在 `ImageAnalysis` 中按 300ms 间隔采样帧进行识别，避免性能开销过大
+- **识别格式**：仅识别 QR Code 格式的二维码
+- **内容格式**：二维码内容应为 JSON 格式，包含 `user_id` 和 `public_key_fingerprint` 字段
+
+#### 识别流程
+
+1. **帧采样**：
+   - 在 `ImageAnalysis` 分析器中，每隔 300ms 采样一帧进行识别
+   - 使用 `qrExecutor`（单线程执行器）在后台线程进行识别，避免阻塞主线程和视频编码
+
+2. **格式转换**：
+   - 将 `ImageProxy`（YUV_420_888）转换为 NV21 格式（ML Kit 要求）
+   - 使用 `toNv21ByteArray()` 扩展函数进行转换
+
+3. **识别与解析**：
+   - 使用 ML Kit 进行二维码识别
+   - 如果识别成功，解析二维码内容（JSON 格式）
+   - 提取 `user_id` 和 `public_key_fingerprint` 用于去重
+
+4. **去重策略**：
+   - 使用 `user_id` + `public_key_fingerprint` 作为去重键（如果存在）
+   - 如果二维码不是 JSON 或缺少这些字段，使用原始内容作为去重键
+   - 同一分段内，同一用户只保留置信度最高的识别结果
+
+5. **置信度计算**：
+   - 基于二维码边界框面积计算置信度
+   - 面积越大，置信度越高
+
+6. **用户反馈**：
+   - **提示音**：识别成功时播放系统提示音（`ToneGenerator.TONE_PROP_ACK`，150ms）
+   - **UI 提示**：在预览层显示"已识别用户"提示（带自动隐藏和节流）
+   - **弱光/快速运动提示**：连续 3 次识别失败后显示"光线不足或移动过快"提示
+
+7. **结果上报**：
+   - 识别结果缓存到当前分段的去重映射中（`qrCache`）
+   - 每个 MP4 分段完成后，将识别结果序列化为 JSON 数组，随分段元数据一起上报
+   - 分段发送后，清空当前分段的识别结果缓存
+
+#### 识别结果格式
+
+每个识别结果包含以下字段：
+
+```json
+{
+  "user_id": "user123",
+  "public_key_fingerprint": "abc123...",
+  "confidence": 0.95,
+  "detected_at_ms": 1734901234567,
+  "detected_at": "2025-12-23T04:14:30.123+08:00"
+}
+```
+
+- `user_id`：用户 ID（从二维码 JSON 中解析，可选）
+- `public_key_fingerprint`：公钥指纹（从二维码 JSON 中解析，可选）
+- `confidence`：置信度（0.0-1.0，基于二维码边界框面积）
+- `detected_at_ms`：检测时间戳（毫秒，绝对时间，与视频水印时间对齐）
+- `detected_at`：检测时间戳（ISO 8601 格式文本）
+
+#### 性能考虑
+
+- **后台线程识别**：使用单线程执行器（`qrExecutor`）在后台线程进行识别，避免阻塞主线程和视频编码
+- **帧采样**：按 300ms 间隔采样帧，避免每帧都进行识别
+- **去重缓存**：使用 `ConcurrentHashMap` 存储当前分段的识别结果，支持并发访问
+- **提示音主线程**：提示音播放切换到主线程（`viewModelScope.launch(Dispatchers.Main)`），确保音频正常播放
+
+#### 日志记录
+
+- 识别成功时记录日志（包含用户 ID、置信度、时间戳）
+- 识别失败时记录日志（包含错误信息）
+- 上传失败时记录错误日志（不重传，仅记录）
+
+#### 16KB 页面大小兼容性
+
+- ML Kit 17.3.0+ 已支持 16KB 页面大小对齐
+- 在 `build.gradle.kts` 中设置 `packaging.jniLibs.useLegacyPackaging = false` 确保正确打包
+- 使用 17.3.0 之前的版本可能会在 Android 15+ 设备上出现兼容性警告
 
 ### 视频旋转性能问题（FPS 下降）
 
@@ -631,6 +775,9 @@ adb install app\build\outputs\apk\debug\app-debug.apk
   - CameraX：`camera-core` / `camera-camera2` / `camera-lifecycle` / `camera-view`
   - Jetpack Compose：`material3`、`runtime`、`ui` 等
   - Accompanist Permissions：相机权限请求
+  - ML Kit Barcode Scanning：二维码识别（版本 17.3.0+，支持 16KB 页面大小）
+  - MediaCodec：H.264 硬件编码
+  - MediaMuxer：MP4 分段封装
   - OkHttp WebSocket：网络通信
 - **后端**
   - Python 3.x

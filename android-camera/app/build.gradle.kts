@@ -73,4 +73,6 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.0")
+    // ML Kit 条码扫描（用于二维码识别）
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
 }
