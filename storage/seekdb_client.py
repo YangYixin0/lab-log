@@ -51,8 +51,8 @@ class SeekDBClient:
         
         sql = """
             INSERT INTO logs_raw (event_id, segment_id, start_time, end_time, 
-                                 event_type, structured, raw_text)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                 event_type, structured, raw_text, is_indexed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
         
         try:
@@ -68,7 +68,8 @@ class SeekDBClient:
                         event_log.end_time,
                         event_log.event_type,
                         structured_json,
-                        event_log.raw_text
+                        event_log.raw_text,
+                        False  # 新插入的事件默认未索引
                     )
                 )
             self.connection.commit()
@@ -349,6 +350,63 @@ class SeekDBClient:
                 return search_results
         except Exception as e:
             raise RuntimeError(f"向量搜索失败: {e}")
+    
+    def mark_events_as_indexed(self, event_ids: List[str]) -> None:
+        """
+        将指定的事件标记为已索引
+        
+        Args:
+            event_ids: 要标记的事件 ID 列表
+        """
+        if not event_ids:
+            return
+        
+        self._ensure_connected()
+        
+        # 使用 IN 子句批量更新
+        placeholders = ','.join(['%s'] * len(event_ids))
+        sql = f"""
+            UPDATE logs_raw
+            SET is_indexed = TRUE
+            WHERE event_id IN ({placeholders})
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, event_ids)
+            self.connection.commit()
+        except Exception as e:
+            self.connection.rollback()
+            raise RuntimeError(f"标记事件为已索引失败: {e}")
+    
+    def get_unindexed_events(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """
+        获取未索引的事件列表
+        
+        Args:
+            limit: 返回的最大数量
+            
+        Returns:
+            未索引的事件列表
+        """
+        self._ensure_connected()
+        
+        sql = """
+            SELECT event_id, segment_id, start_time, end_time, event_type, 
+                   structured, raw_text, created_at
+            FROM logs_raw
+            WHERE is_indexed = FALSE
+            ORDER BY created_at ASC
+            LIMIT %s
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, (limit,))
+                results = cursor.fetchall()
+                return list(results)
+        except Exception as e:
+            raise RuntimeError(f"获取未索引事件失败: {e}")
     
     def get_table_data(self, table_name: str, page: int = 1, limit: int = 50) -> Dict[str, Any]:
         """获取表数据（支持分页）"""

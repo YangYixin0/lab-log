@@ -63,8 +63,9 @@
    - 处理管线：VideoLogPipeline → 写入 logs_raw（加密字段）+ 可选索引 logs_embedding → 生成缩略图 → 单行 Realtime 日志输出。
 
 2) **离线处理（已有 MP4 文件）**
-   - 使用 `scripts/process_video.py /path/to/video.mp4`（可选 `--indexing`）直接跑 VideoLogPipeline。
-   - 生成事件日志（logs_raw / event_logs.jsonl），若开启索引则写入 logs_embedding。
+   - 使用 `scripts/process_video.py /path/to/video.mp4` 直接跑 VideoLogPipeline。
+   - 生成事件日志（logs_raw / event_logs.jsonl），每个分段理解后立即写入数据库。
+   - 索引需要手动触发：使用 `scripts/index_events.py` 对未索引的事件进行分块和嵌入。
 
 ### 数据流
 
@@ -84,10 +85,14 @@
 4. **数据存储**：
    - 写入 SeekDB 的 `logs_raw` 表（包含加密后的结构化数据）
    - 同时写入 `logs_debug/event_logs.jsonl` 用于调试
-5. **索引构建**（可选）：
+   - 每个分段理解后立即写入数据库，不等待所有分段完成
+5. **索引构建**（手动触发）：
+   - 使用 `scripts/index_events.py` 手动触发索引
+   - 对未索引的事件（`is_indexed = FALSE`）进行分块和嵌入
    - 使用配置的分块策略聚合事件日志（默认：每个事件一个块）
    - 生成文本向量嵌入（Qwen text-embedding-v4，1024 维）
    - 写入 `logs_embedding` 表，支持后续的向量搜索
+   - 索引完成后，将相关事件的 `is_indexed` 字段更新为 `TRUE`
 
 ## 快速开始
 
@@ -404,8 +409,7 @@ python scripts/process_video.py /path/to/video.mp4
 .venv/bin/python scripts/process_video.py /path/to/video.mp4
 ```
 
-可选参数：
-- `--indexing`: 启用索引（分块和嵌入），默认不进行索引（索引通常在测试时手动触发或生产环境定时任务中执行）
+**注意**：索引已从视频处理流程中剥离，改为手动触发。请使用 `scripts/index_events.py` 对未索引的事件进行分块和嵌入。
 
 ### 8. Web 前端功能
 
@@ -507,10 +511,14 @@ python scripts/clear_test_data.py
 - 可通过 `config/encryption_config.py` 配置
 
 ### 日志分块与嵌入
-- **默认行为**：视频处理默认不进行索引（分块和嵌入），以提高处理速度
+- **默认行为**：视频处理不进行索引（分块和嵌入），每个分段理解后立即写入数据库
 - **索引触发方式**：
-  - 测试时：使用 `--indexing` 参数手动触发
-  - 生产环境：在特定时间（如凌晨）通过定时任务批量执行索引
+  - 手动触发：使用 `scripts/index_events.py` 对未索引的事件进行分块和嵌入
+  - 生产环境：在特定时间（如凌晨）通过定时任务调用 `scripts/index_events.py` 批量执行索引
+- **索引状态跟踪**：
+  - `logs_raw` 表新增 `is_indexed` 字段，标记事件是否已索引
+  - 新插入的事件默认 `is_indexed = FALSE`
+  - 索引完成后，相关事件的 `is_indexed` 字段更新为 `TRUE`
 - **分块策略**：模块化设计，支持多种分块策略
   - 默认策略：每个事件一个块
   - 时间窗口策略：按时间窗口（可配置，默认 7.5 分钟）聚合事件

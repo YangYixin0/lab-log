@@ -15,7 +15,7 @@ from orchestration.pipeline import VideoLogPipeline
 def main():
     parser = argparse.ArgumentParser(description='处理视频并生成日志')
     parser.add_argument('video_path', type=str, help='视频文件路径')
-    parser.add_argument('--indexing', action='store_true', help='启用索引（分块和嵌入），默认不进行索引')
+    parser.add_argument('--indexing', action='store_true', help='（已废弃）索引已改为手动触发，请使用 scripts/index_events.py')
     
     args = parser.parse_args()
     

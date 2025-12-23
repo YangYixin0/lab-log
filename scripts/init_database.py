@@ -125,8 +125,48 @@ def generate_rsa_keypair() -> Tuple[str, str]:
     return private_key_pem, public_key_pem
 
 
+def drop_database_and_tables(connection, database_name: str):
+    """删除数据库（如果存在）"""
+    try:
+        with connection.cursor() as cursor:
+            # 先删除数据库（这会自动删除所有表）
+            cursor.execute(f"DROP DATABASE IF EXISTS {database_name}")
+            connection.commit()
+            print(f"  已删除数据库 '{database_name}'（如果存在）")
+    except Exception as e:
+        print(f"  删除数据库失败: {e}")
+        raise
+
+
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='初始化数据库')
+    parser.add_argument('--drop-first', action='store_true', 
+                       help='先删除数据库再重新创建（清空所有数据）')
+    args = parser.parse_args()
+    
     print("开始初始化数据库...")
+    
+    database_name = DatabaseConfig.DATABASE
+    
+    # 0. 如果指定了 --drop-first，先删除数据库
+    if args.drop_first:
+        print("步骤 0/3: 删除现有数据库...")
+        try:
+            # 连接到 MySQL（不指定数据库）
+            conn = pymysql.connect(
+                host=DatabaseConfig.HOST,
+                port=DatabaseConfig.PORT,
+                user=DatabaseConfig.USER,
+                password=DatabaseConfig.PASSWORD,
+                charset='utf8mb4'
+            )
+            drop_database_and_tables(conn, database_name)
+            conn.close()
+        except Exception as e:
+            print(f"  删除数据库失败: {e}")
+            sys.exit(1)
     
     # 1. 执行 schema.sql
     print("步骤 1/3: 创建数据库和表...")
@@ -154,34 +194,50 @@ def main():
     
     # 2. 创建测试用户（admin）
     print("步骤 2/3: 创建测试用户（admin）...")
-    private_key_pem, public_key_pem = generate_rsa_keypair()
     
-    # 保存私钥到文件（仅用于测试）
-    keys_dir = project_root / 'scripts' / 'test_keys'
-    keys_dir.mkdir(exist_ok=True)
-    private_key_file = keys_dir / 'admin_private_key.pem'
-    with open(private_key_file, 'w') as f:
-        f.write(private_key_pem)
-    print(f"  测试用户私钥已保存到: {private_key_file}")
-    print("  警告: 请妥善保管私钥文件，不要提交到版本控制系统！")
-    
+    # 检查用户是否已存在
+    user_exists = False
     try:
-        from web_api.auth import hash_password
-        # 为 admin 用户设置默认密码 "admin"（仅用于测试）
-        admin_password_hash = hash_password('admin')
-        
         with SeekDBClient() as db:
-            db.create_user(
-                user_id='admin',
-                username='admin',
-                public_key_pem=public_key_pem,
-                password_hash=admin_password_hash,
-                role='admin'
-            )
-        print("  测试用户创建成功（用户名: admin, 密码: admin, 角色: admin）")
-    except Exception as e:
-        print(f"  创建测试用户失败: {e}")
-        sys.exit(1)
+            existing_user = db.get_user_by_id('admin')
+            if existing_user:
+                user_exists = True
+    except:
+        pass
+    
+    if user_exists and not args.drop_first:
+        print("  测试用户已存在，跳过创建")
+        keys_dir = project_root / 'scripts' / 'test_keys'
+        private_key_file = keys_dir / 'admin_private_key.pem'
+    else:
+        private_key_pem, public_key_pem = generate_rsa_keypair()
+        
+        # 保存私钥到文件（仅用于测试）
+        keys_dir = project_root / 'scripts' / 'test_keys'
+        keys_dir.mkdir(exist_ok=True)
+        private_key_file = keys_dir / 'admin_private_key.pem'
+        with open(private_key_file, 'w') as f:
+            f.write(private_key_pem)
+        print(f"  测试用户私钥已保存到: {private_key_file}")
+        print("  警告: 请妥善保管私钥文件，不要提交到版本控制系统！")
+        
+        try:
+            from web_api.auth import hash_password
+            # 为 admin 用户设置默认密码 "admin"（仅用于测试）
+            admin_password_hash = hash_password('admin')
+            
+            with SeekDBClient() as db:
+                db.create_user(
+                    user_id='admin',
+                    username='admin',
+                    public_key_pem=public_key_pem,
+                    password_hash=admin_password_hash,
+                    role='admin'
+                )
+            print("  测试用户创建成功（用户名: admin, 密码: admin, 角色: admin）")
+        except Exception as e:
+            print(f"  创建测试用户失败: {e}")
+            sys.exit(1)
     
     # 3. 验证
     print("步骤 3/3: 验证数据库...")
