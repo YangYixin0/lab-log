@@ -18,6 +18,7 @@ import websockets
 from streaming_server.monitoring import MonitoringLogger
 from orchestration.pipeline import VideoLogPipeline
 from storage.models import VideoSegment
+from utils.segment_time_parser import parse_segment_times
 RECORDINGS_ROOT = Path("recordings")
 RECORDINGS_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -92,41 +93,20 @@ class RecordingSession:
         
         # 生成时间戳（从segment_id中提取，格式：YYYYMMDD_HHMMSS_XX）
         # 如果无法解析，使用当前时间
-        try:
-            # segment_id格式：20251221_195713_00
-            parts = segment_id.split('_')
-            if len(parts) >= 2:
-                date_str = parts[0]  # 20251221
-                time_str = parts[1]   # 195713
-                timestamp_str = f"{date_str}_{time_str}"
-                # 解析为datetime
-                segment_time = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
-                start_time = segment_time.timestamp()
-                # 估算结束时间（假设分段时长为target_segment_duration）
-                end_time = start_time + REALTIME_TARGET_SEGMENT_DURATION
-            else:
-                # 无法解析，使用当前时间
-                current_time = time.time()
-                start_time = current_time
-                end_time = current_time + REALTIME_TARGET_SEGMENT_DURATION
-        except Exception as e:
-            print(f"[Warning]: Failed to parse timestamp from segment_id {segment_id}: {e}")
-            current_time = time.time()
-            start_time = current_time
-            end_time = current_time + REALTIME_TARGET_SEGMENT_DURATION
+        start_time, end_time = parse_segment_times(segment_id, REALTIME_TARGET_SEGMENT_DURATION)
         
         self.segment_count += 1
         print(f"[Info]: Saved MP4 segment {segment_id} ({len(mp4_data)} bytes) to {segment_path}")
         
         # 如果启用实时处理，加入处理队列
-            if self.enable_realtime_processing and self.processing_queue:
+        if self.enable_realtime_processing and self.processing_queue:
             segment_info = {
                 'segment_id': segment_id,
                 'segment_path': str(segment_path),
                 'start_time': start_time,
-                    'end_time': end_time,
-                    'mp4_size_mb': len(mp4_data) / (1024 * 1024),
-                    'qr_results': qr_results
+                'end_time': end_time,
+                'mp4_size_mb': len(mp4_data) / (1024 * 1024),
+                'qr_results': qr_results
             }
             self.processing_queue.put_nowait(segment_info)
     

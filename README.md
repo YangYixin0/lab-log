@@ -59,13 +59,22 @@
 1) **实时处理（Android 采集端 → WebSocket 服务器）**
    - Android 端用 MediaCodec 编码 H.264，并在关键帧前附带完整 SPS/PPS（关键经验：给 IDR 帧前置 SPS/PPS，保证每段 MP4 可独立解码），使用 MediaMuxer 生成小 MP4 分段，通过 WebSocket 发送到服务器。
    - **二维码识别**：采集过程中使用 ML Kit 实时识别用户二维码，按分段聚合识别结果（同一用户保留最高置信度），随 MP4 分段元数据一起上报。识别成功时播放提示音并在预览层显示提示。
-   - 服务器 `streaming_server` 接收 Base64 MP4 文本消息（包含二维码识别结果），落盘到 `recordings/`，按环境开关决定是否实时处理和索引。
-   - 处理管线：VideoLogPipeline → 写入 logs_raw（加密字段）+ 可选索引 logs_embedding → 生成缩略图 → 单行 Realtime 日志输出。
+   - 服务器 `streaming_server` 接收 Base64 MP4 文本消息（包含二维码识别结果），保存到 `recordings/<client_id>_<timestamp>/` 目录：
+     - MP4 分段保存为 `{segment_id}.mp4`
+     - 二维码识别结果保存为 `{segment_id}_qr.json`
+   - 如果启用实时处理，立即进行视频理解并写入数据库；否则仅保存文件，后续可使用 `scripts/process_recording_session.py` 处理。
+   - 处理管线：VideoLogPipeline → 写入 logs_raw（加密字段）→ 生成缩略图 → 单行 Realtime 日志输出。
 
 2) **离线处理（已有 MP4 文件）**
    - 使用 `scripts/process_video.py /path/to/video.mp4` 直接跑 VideoLogPipeline。
    - 生成事件日志（logs_raw / event_logs.jsonl），每个分段理解后立即写入数据库。
    - 索引需要手动触发：使用 `scripts/index_events.py` 对未索引的事件进行分块和嵌入。
+
+3) **处理已保存的采集会话**
+   - 使用 `scripts/process_recording_session.py recordings/<session_dir>` 处理一次采集会话的所有分段。
+   - 自动读取会话目录下的 MP4 分段和对应的二维码识别结果（`*_qr.json` 文件）。
+   - 每个分段理解后立即写入数据库，二维码结果会传递给视频理解部分（当前暂不使用）。
+   - 适用于处理实时采集后保存的会话数据，或重新处理历史会话。
 
 ### 数据流
 
@@ -398,7 +407,9 @@ python streaming_server/test_qr_server.py
 
 ### 7. 处理视频（离线处理）
 
-处理已录制的 MP4 视频文件：
+#### 7.1 处理未分段的完整视频
+
+处理已录制的完整 MP4 视频文件（会自动分段）：
 
 ```bash
 # 如果使用虚拟环境，先激活（或直接使用 .venv/bin/python）
@@ -410,6 +421,53 @@ python scripts/process_video.py /path/to/video.mp4
 ```
 
 **注意**：索引已从视频处理流程中剥离，改为手动触发。请使用 `scripts/index_events.py` 对未索引的事件进行分块和嵌入。
+
+#### 7.2 处理已保存的采集会话
+
+处理实时采集后保存的会话目录（包含 MP4 分段和二维码识别结果）：
+
+```bash
+# 处理一次采集会话的所有分段
+python scripts/process_recording_session.py recordings/<session_dir>
+
+# 指定分段目标时长（用于解析时间戳失败时的回退）
+python scripts/process_recording_session.py recordings/<session_dir> --target-duration 60.0
+```
+
+**功能说明**：
+- 自动读取会话目录下的所有 MP4 分段文件
+- 自动读取对应的二维码识别结果（`{segment_id}_qr.json` 文件）
+- 按顺序串行处理每个分段，每个分段理解后立即写入数据库
+- 二维码识别结果会传递给视频理解部分（当前暂不使用，但已保存）
+
+**会话目录结构**：
+```
+recordings/
+└── <client_id>_<timestamp>/
+    ├── 20251221_195713_00.mp4
+    ├── 20251221_195713_00_qr.json
+    ├── 20251221_195714_00.mp4
+    ├── 20251221_195714_00_qr.json
+    └── ...
+```
+
+#### 7.3 手动触发索引
+
+对未索引的事件进行分块和嵌入：
+
+```bash
+# 处理未索引的事件（默认每次最多处理 1000 个事件，批量大小 100）
+python scripts/index_events.py
+
+# 指定处理数量
+python scripts/index_events.py --limit 2000 --batch-size 200
+```
+
+**功能说明**：
+- 自动查询 `is_indexed = FALSE` 的事件
+- 分批处理，避免内存溢出
+- 索引完成后自动更新 `is_indexed` 字段为 `TRUE`
+- 支持多次运行，会自动跳过已索引的事件
 
 ### 8. Web 前端功能
 
@@ -460,6 +518,15 @@ python scripts/process_video.py /path/to/video.mp4
 项目提供了多个工具脚本用于测试和调试：
 
 ```bash
+# 处理未分段的完整视频
+python scripts/process_video.py <视频文件路径>
+
+# 处理已保存的采集会话（包含二维码结果）
+python scripts/process_recording_session.py recordings/<session_dir>
+
+# 手动触发索引（对未索引的事件进行分块和嵌入）
+python scripts/index_events.py [--limit 1000] [--batch-size 100]
+
 # 测试分段功能（不调用大模型）
 python scripts/test_segmentation.py <视频文件路径>
 
@@ -569,16 +636,20 @@ lab-log/
 │   ├── chunking_strategies.py  # 分块策略实现
 │   └── embedding_service.py    # 向量嵌入服务
 ├── orchestration/       # 流程编排
+├── utils/               # 工具函数
+│   └── segment_time_parser.py  # 分段时间解析工具函数
 ├── nginx/               # Nginx 配置
 │   └── lab-log.conf     # Nginx 反向代理配置
 ├── scripts/             # 工具脚本
-│   ├── process_video.py         # 视频处理入口
-│   ├── init_database.py         # 数据库初始化
-│   ├── clear_test_data.py       # 清空测试数据
-│   ├── test_segmentation.py     # 测试分段功能
-│   ├── analyze_keyframes.py     # 分析关键帧
-│   ├── extract_segment_aligned.py  # 对齐关键帧提取片段
-│   └── test_vector_search.py    # 测试向量搜索
+│   ├── process_video.py              # 视频处理入口（处理未分段视频）
+│   ├── process_recording_session.py  # 处理已保存的采集会话（包含二维码结果）
+│   ├── index_events.py              # 手动触发索引（分块和嵌入）
+│   ├── init_database.py             # 数据库初始化
+│   ├── clear_test_data.py           # 清空测试数据
+│   ├── test_segmentation.py         # 测试分段功能
+│   ├── analyze_keyframes.py         # 分析关键帧
+│   ├── extract_segment_aligned.py   # 对齐关键帧提取片段
+│   └── test_vector_search.py        # 测试向量搜索
 ├── start.sh             # 启动脚本（后端+前端+Nginx）
 ├── stop.sh              # 停止脚本
 └── logs_debug/          # 调试日志（JSONL 格式）

@@ -14,24 +14,7 @@ sys.path.insert(0, str(project_root))
 
 from orchestration.pipeline import VideoLogPipeline
 from storage.models import VideoSegment
-
-
-def parse_segment_times(segment_id: str, target_duration: float) -> tuple[float, float]:
-    """复用服务器端的分段时间解析逻辑"""
-    try:
-        parts = segment_id.split('_')
-        if len(parts) >= 2:
-            date_str = parts[0]  # 20251221
-            time_str = parts[1]  # 195713
-            ts_str = f"{date_str}_{time_str}"
-            segment_time = time.strptime(ts_str, "%Y%m%d_%H%M%S")
-            start = time.mktime(segment_time)
-            end = start + target_duration
-            return start, end
-    except Exception:
-        pass
-    now = time.time()
-    return now, now + target_duration
+from utils.segment_time_parser import parse_segment_times
 
 
 def load_segments(session_dir: Path, target_duration: float) -> List[VideoSegment]:
