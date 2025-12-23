@@ -6,10 +6,12 @@
 
 ### 核心特性
 
+- **动态上下文视频理解**：使用动态上下文驱动的视频理解，基于当天事件缓存、人物外貌表缓存和二维码识别结果构建提示词，模型输出续写事件和外貌更新
 - **视频理解**：使用 Qwen3-VL Flash 视觉大模型分析实验室视频，自动识别人物动作、设备操作等信息
+- **人物外貌管理**：自动维护人物外貌表缓存，支持追加、更新、合并操作，使用并查集管理编号合并关系
 - **二维码识别**：Android 采集端实时识别用户二维码，自动关联用户身份与视频片段
-- **结构化日志**：将视频内容转换为带时间戳的结构化事件日志
-- **字段级加密**：支持对敏感字段（如人物外观特征）进行加密，使用混合加密方案（AES-GCM + RSA-OAEP）
+- **结构化日志**：将视频内容转换为带时间戳的结构化事件日志（事件不加密，直接写入数据库）
+- **字段级加密**：支持对敏感字段（如人物外观特征）进行加密，使用混合加密方案（AES-GCM + RSA-OAEP）（日终处理时对人物外貌表加密）
 - **向量检索**：支持日志的向量嵌入和语义搜索，便于后续的智能查询和分析
 - **Web 前端**：提供用户友好的 Web 界面，支持用户注册、登录、查看数据和管理功能
 - **权限管理**：支持用户角色（admin/user），admin 用户可以查看数据库和进行向量搜索
@@ -20,8 +22,10 @@
 
 - **视频接入**：支持 MP4 视频文件处理（未来可扩展为流式处理）
 - **视频分段**：使用关键帧对齐将长视频分割为处理段（约 60 秒），支持迭代式分段确保连续性
-- **视频理解**：调用 Qwen3-VL Flash API 进行视频内容分析
-- **日志写入**：将识别的事件写入数据库，并对敏感字段进行加密
+- **动态上下文**：维护当天事件缓存（最新 n 条）和人物外貌表缓存（全量），用于构建模型提示词
+- **视频理解**：调用 Qwen3-VL Flash API 进行视频内容分析，使用动态上下文生成续写事件和外貌更新
+- **人物外貌管理**：使用并查集管理人物编号合并关系，支持追加、更新、合并操作
+- **日志写入**：将识别的事件直接写入数据库（不加密），人物外貌表缓存在内存/文件，日终再加密入库
 - **向量嵌入**：对日志进行分块和向量化，支持语义搜索
 - **存储**：使用 SeekDB 作为数据库，支持关系型、向量和全文搜索
 - **Web 前端**：React + Vite 构建的用户界面，提供数据查看和管理功能
@@ -31,6 +35,35 @@
 ## 工作流程
 
 ### 整体流程（逻辑视角）
+
+#### 动态上下文模式（默认）
+
+```
+视频文件 (MP4) + 二维码识别结果
+    ↓
+[视频分段] 关键帧对齐，分为多个约 60 秒的片段（迭代式分段确保连续性）
+    ↓
+[动态上下文构建]
+    ├─ 查询当天最新 n 条事件（从数据库）
+    ├─ 加载人物外貌表缓存（从内存/文件）
+    └─ 获取二维码识别结果（从分段元数据）
+    ↓
+[视频理解] 调用 Qwen3-VL Flash，输入动态上下文，输出：
+    ├─ events_to_append: 续写的事件列表
+    └─ appearance_updates: 外貌更新（add/update/merge）
+    ↓
+[事件写入] 立即写入 SeekDB 数据库（不加密）+ 调试 JSONL 文件
+    ↓
+[外貌更新] 更新人物外貌表缓存（内存）
+    ↓
+[周期性保存] 每处理 N 个分段，dump 外貌缓存到文件
+    ↓
+[日终处理] 并查集压缩 → 加密 user_id → 写入数据库 → 更新事件 person_ids → 触发索引
+    ↓
+完成
+```
+
+#### 传统模式（兼容）
 
 ```
 视频文件 (MP4)
@@ -63,7 +96,12 @@
      - MP4 分段保存为 `{segment_id}.mp4`
      - 二维码识别结果保存为 `{segment_id}_qr.json`
    - 如果启用实时处理，立即进行视频理解并写入数据库；否则仅保存文件，后续可使用 `scripts/process_recording_session.py` 处理。
-   - 处理管线：VideoLogPipeline → 写入 logs_raw（加密字段）→ 生成缩略图 → 单行 Realtime 日志输出。
+   - **动态上下文模式**（默认启用）：
+     - 每个会话维护独立的人物外貌缓存（AppearanceCache）
+     - 从数据库查询当天最新 n 条事件作为上下文
+     - 模型输出续写事件和外貌更新，事件立即入库（不加密），外貌更新写入缓存
+     - 每处理 N 个分段，自动保存外貌缓存到 `logs_debug/appearances_today.json`
+   - 处理管线：动态上下文构建 → Qwen3-VL Flash → 解析双输出 → 事件写入 logs_raw（不加密）→ 外貌更新缓存 → 生成缩略图 → 单行 Realtime 日志输出。
 
 2) **离线处理（已有 MP4 文件）**
    - 使用 `scripts/process_video.py /path/to/video.mp4` 直接跑 VideoLogPipeline。
@@ -83,18 +121,25 @@
    - 以关键帧为边界进行分段，每个分段约 60 秒
    - 采用迭代式分段：每提取一个分段后，检查实际结束时间，从那里开始下一个分段
    - 确保分段连续且无重叠，每个分段不超过 5 分钟
-2. **视频理解**：
+2. **视频理解**（动态上下文模式）：
+   - 构建动态提示词：包含视频片段、二维码识别结果、当天最新 n 条事件、人物外貌表全量
    - 调用 Qwen3-VL Flash API 分析视频内容
-   - 提取人物动作、设备操作、时间戳等信息
-   - 生成结构化的事件列表（EventLog）
-3. **日志加密**（如启用）：
-   - 对敏感字段（如 `person.clothing_color`）使用 AES-256-GCM 加密
-   - 使用用户 RSA 公钥加密数据加密密钥（DEK）
-   - 将加密后的字段和 DEK 分别存储
-4. **数据存储**：
-   - 写入 SeekDB 的 `logs_raw` 表（包含加密后的结构化数据）
+   - 模型输出两部分：
+     - `events_to_append`：续写的事件列表（event_id, start_time, end_time, event_type, person_ids, equipment, description）
+     - `appearance_updates`：外貌更新操作（add/update/merge）
+   - 应用外貌更新到缓存（使用并查集管理合并关系）
+   - 生成结构化的事件列表（EventLog），事件不加密直接写入数据库
+3. **数据存储**（动态上下文模式）：
+   - 事件立即写入 SeekDB 的 `logs_raw` 表（不加密，structured 字段包含 person_ids 列表）
    - 同时写入 `logs_debug/event_logs.jsonl` 用于调试
+   - 人物外貌表缓存在内存中，每处理 N 个分段自动保存到 `logs_debug/appearances_today.json`
    - 每个分段理解后立即写入数据库，不等待所有分段完成
+4. **日终处理**（可选）：
+   - 使用 `scripts/end_of_day.py` 执行日终处理
+   - 加载外貌缓存，执行并查集去重压缩
+   - 加密 user_id 并写入数据库
+   - 更新数据库中事件的 person_ids（将被合并编号替换为主编号）
+   - 触发索引（分块和嵌入）
 5. **索引构建**（手动触发）：
    - 使用 `scripts/index_events.py` 手动触发索引
    - 对未索引的事件（`is_indexed = FALSE`）进行分块和嵌入
@@ -231,6 +276,12 @@ REALTIME_PROCESSING_ENABLED=true  # 是否启用实时处理（默认true）
 REALTIME_TARGET_SEGMENT_DURATION=60.0  # 目标分段时长（秒，默认60）
 REALTIME_QUEUE_ALERT_THRESHOLD=10  # 队列告警阈值（默认10）
 REALTIME_CLEANUP_H264=true  # 是否清理H264临时文件（默认true）
+
+# 动态上下文配置（可选）
+DYNAMIC_CONTEXT_ENABLED=true  # 是否启用动态上下文（默认true）
+MAX_RECENT_EVENTS=20  # 最大最近事件数（默认20）
+APPEARANCE_DUMP_INTERVAL=5  # 外貌缓存保存间隔（每处理N个分段保存一次，默认5）
+
 # 注意：索引已不再由视频处理触发，统一由独立脚本处理（如 scripts/index_events.py）
 
 # 数据库配置（可选，使用默认值）
@@ -527,6 +578,9 @@ python scripts/process_recording_session.py recordings/<session_dir>
 # 手动触发索引（对未索引的事件进行分块和嵌入）
 python scripts/index_events.py [--limit 1000] [--batch-size 100]
 
+# 日终处理（外貌缓存压缩、加密入库、更新事件 person_ids）
+python scripts/end_of_day.py [--date YYYY-MM-DD] [--dry-run]
+
 # 测试分段功能（不调用大模型）
 python scripts/test_segmentation.py <视频文件路径>
 
@@ -567,15 +621,31 @@ python scripts/clear_test_data.py
 - **最大段长限制**：每个分段不超过 5 分钟，确保发送给大模型的视频不会过长
 - **回退机制**：如果关键帧太少，自动回退到时间分段
 
-### 视频理解
+### 动态上下文视频理解
+- **动态提示词构建**：基于当天事件缓存（最新 n 条）、人物外貌表缓存（全量）和二维码识别结果构建提示词
+- **模型输出**：模型输出两部分结构化数据
+  - `events_to_append`：续写的事件列表（event_id, start_time, end_time, event_type, person_ids, equipment, description）
+  - `appearance_updates`：外貌更新操作（add/update/merge）
+- **编号分配规则**：模型分配人物编号（p1, p2...）和事件编号（evt_00001...），新增编号必须大于现存最大编号
+- **人物外貌匹配**：
+  - 优先重用已有外貌记录（匹配稀有特征）
+  - 常见特征一致是匹配的必要条件但不充分
+  - 稀有特征一致是合并的强信号
+  - 合并方向：小编号合并到大编号（merge_from < target_person_id）
+- **外貌表管理**：使用并查集管理人物编号合并关系，支持路径压缩
+- **二维码用户关联**：根据二维码识别结果的时间戳，将用户ID关联到对应的人物外貌记录
+
+### 视频理解（传统模式）
 - 使用 Qwen3-VL Flash 进行视频理解
 - 自动提取人物动作、设备操作等信息
 - 从视频画面提取时间戳
 
 ### 日志加密
-- 字段级加密（混合加密：AES-GCM + RSA-OAEP）
-- 默认加密字段：`person.clothing_color`, `person.hair_color`
-- 可通过 `config/encryption_config.py` 配置
+- **事件日志**：动态上下文模式下，事件不加密直接写入数据库
+- **人物外貌表**：缓存在内存/文件中（明文），日终处理时加密 user_id 并写入数据库
+- **传统模式**：字段级加密（混合加密：AES-GCM + RSA-OAEP）
+  - 默认加密字段：`person.clothing_color`, `person.hair_color`
+  - 可通过 `config/encryption_config.py` 配置
 
 ### 日志分块与嵌入
 - **默认行为**：视频处理不进行索引（分块和嵌入），每个分段理解后立即写入数据库
@@ -627,6 +697,10 @@ lab-log/
 │   │   └── api/            # API 客户端
 │   └── package.json        # 前端依赖
 ├── config/              # 配置模块
+├── context/             # 动态上下文模块
+│   ├── appearance_cache.py      # 人物外貌缓存管理器（并查集）
+│   ├── event_context.py         # 事件上下文查询
+│   └── prompt_builder.py        # 动态提示词构建器
 ├── storage/             # 数据库存储
 ├── segmentation/        # 视频分段
 ├── video_processing/    # 视频理解
@@ -644,6 +718,7 @@ lab-log/
 │   ├── process_video.py              # 视频处理入口（处理未分段视频）
 │   ├── process_recording_session.py  # 处理已保存的采集会话（包含二维码结果）
 │   ├── index_events.py              # 手动触发索引（分块和嵌入）
+│   ├── end_of_day.py                # 日终处理脚本（外貌缓存压缩、加密入库、更新事件 person_ids）
 │   ├── init_database.py             # 数据库初始化
 │   ├── clear_test_data.py           # 清空测试数据
 │   ├── test_segmentation.py         # 测试分段功能
@@ -738,7 +813,22 @@ LIMIT 5;
 - 距离越小（接近 0），相似度越高；距离越大（接近 2），相似度越低
 - 支持语义搜索，可以找到语义相关的内容，即使关键词不完全匹配
 
-### 4. 全文搜索
+### 4. 查看人物外貌缓存
+
+人物外貌缓存保存在 `logs_debug/appearances_today.json`，可在 Cursor IDE 中打开查看。
+
+```bash
+# 查看外貌缓存（JSON 格式）
+cat logs_debug/appearances_today.json | jq .
+
+# 查看主记录数量
+cat logs_debug/appearances_today.json | jq '.records | length'
+
+# 查看并查集映射关系
+cat logs_debug/appearances_today.json | jq '.union_find'
+```
+
+### 5. 全文搜索
 
 ```sql
 -- 使用全文索引搜索
@@ -750,7 +840,7 @@ ORDER BY score DESC
 LIMIT 10;
 ```
 
-### 5. 查看二维码识别结果
+### 6. 查看二维码识别结果
 
 二维码识别结果随 MP4 分段一起上报，格式为 `qr_results` 数组。每个结果包含：
 - `user_id`：用户 ID（从二维码 JSON 中解析）
@@ -841,7 +931,14 @@ python streaming_server/test_qr_server.py
    - 识别结果随 MP4 分段元数据一起上报，格式为 `qr_results` 数组，包含 `user_id`、`public_key_fingerprint`、`confidence`、`detected_at_ms`、`detected_at` 字段
    - 识别成功时播放系统提示音并在预览层显示"已识别用户"提示
 
-10. **画面条纹问题解决经验**：
+10. **动态上下文功能**：
+    - 默认启用动态上下文模式（`DYNAMIC_CONTEXT_ENABLED=true`）
+    - 每个录制会话维护独立的人物外貌缓存
+    - 外貌缓存自动保存到 `logs_debug/appearances_today.json`（每处理 N 个分段）
+    - 事件不加密直接写入数据库，人物外貌表日终再加密入库
+    - 使用 `scripts/end_of_day.py` 执行日终处理（压缩、加密、更新事件 person_ids）
+
+11. **画面条纹问题解决经验**：
     - **问题现象**：竖屏采集时视频画面出现绿色/紫色条纹
     - **根本原因**：编码器输入色彩格式不匹配。某些设备（如 Pixel 6a）的硬件编码器实际使用 `COLOR_FormatYUV420Planar`（I420，分离 U/V 平面），而代码一直提供 NV12（半平面，交错 UV），导致 UV 平面错位
     - **解决方案**：
@@ -852,7 +949,7 @@ python streaming_server/test_qr_server.py
     - **关键代码**：`H264Encoder.encode()` 中根据 `encoderColorFormat` 动态选择 NV12 或 I420 格式
     - **额外收益**：使用真实帧时间戳后，视频 FPS 反映实际捕获速率（可能为非整数），播放速度与现实时间完美对齐
 
-11. **16KB 页面大小兼容性**：
+12. **16KB 页面大小兼容性**：
     - Android 15+ 要求所有原生库（.so 文件）对齐到 16KB 页面大小
     - ML Kit 17.3.0+ 已支持 16KB 对齐，使用该版本可避免兼容性警告
     - 在 `build.gradle.kts` 中设置 `packaging.jniLibs.useLegacyPackaging = false` 确保正确打包

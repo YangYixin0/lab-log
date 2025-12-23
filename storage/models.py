@@ -17,14 +17,32 @@ class VideoSegment:
 
 @dataclass
 class EventLog:
-    """事件日志（系统最小原子）"""
+    """
+    事件日志（系统最小原子）
+    
+    structured 字段格式（动态上下文版本）:
+    {
+        "person_ids": ["p1", "p2"],  # 涉及的人物编号列表
+        "equipment": "离心机",        # 设备名称
+    }
+    
+    旧格式（兼容模式）:
+    {
+        "person": {
+            "upper_clothing_color": "白色",
+            "hair_color": "黑色",
+            "action": "操作设备"
+        },
+        "equipment": "离心机"
+    }
+    """
     event_id: str
     segment_id: str
     start_time: datetime
     end_time: datetime
     event_type: Optional[str] = None  # 事件类型，如 "person"、"equipment-only"
-    structured: Dict[str, Any] = field(default_factory=dict)  # 固定 schema
-    raw_text: str = ""
+    structured: Dict[str, Any] = field(default_factory=dict)
+    raw_text: str = ""  # 事件的自然语言描述（不含外貌信息）
 
 
 @dataclass

@@ -1,11 +1,10 @@
-"""WebSocket服务器：接收Android App的MP4视频分段并实时处理"""
+"""WebSocket服务器：接收Android App的MP4视频分段并实时处理（动态上下文版本）"""
 
 import argparse
 import asyncio
 import base64
 import json
 import os
-import struct
 import subprocess
 import time
 from datetime import datetime
@@ -16,18 +15,29 @@ import websockets
 
 # 导入实时处理相关模块
 from streaming_server.monitoring import MonitoringLogger
-from orchestration.pipeline import VideoLogPipeline
 from storage.models import VideoSegment
+from storage.seekdb_client import SeekDBClient
 from utils.segment_time_parser import parse_segment_times
+
+# 动态上下文相关模块
+from context.appearance_cache import AppearanceCache
+from context.event_context import EventContext
+from video_processing.qwen3_vl_processor import Qwen3VLProcessor
+from log_writer.writer import SimpleLogWriter
+
 RECORDINGS_ROOT = Path("recordings")
 RECORDINGS_ROOT.mkdir(parents=True, exist_ok=True)
+
+# 调试日志目录
+DEBUG_LOG_DIR = Path("logs_debug")
+DEBUG_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # 跟踪当前已连接的客户端及其录制会话
 CONNECTED_CLIENTS = set()
 RECORDING_SESSIONS: Dict[websockets.WebSocketServerProtocol, "RecordingSession"] = {}
 
 # 环境变量配置
-def get_config(key: str, default: any, type_func: type = str):
+def get_config(key: str, default, type_func: type = str):
     """从环境变量读取配置"""
     value = os.getenv(key)
     if value is None:
@@ -40,6 +50,9 @@ REALTIME_PROCESSING_ENABLED = get_config('REALTIME_PROCESSING_ENABLED', True, bo
 REALTIME_TARGET_SEGMENT_DURATION = get_config('REALTIME_TARGET_SEGMENT_DURATION', 60.0, float)
 REALTIME_QUEUE_ALERT_THRESHOLD = get_config('REALTIME_QUEUE_ALERT_THRESHOLD', 10, int)
 REALTIME_CLEANUP_H264 = get_config('REALTIME_CLEANUP_H264', True, bool)
+DYNAMIC_CONTEXT_ENABLED = get_config('DYNAMIC_CONTEXT_ENABLED', True, bool)
+MAX_RECENT_EVENTS = get_config('MAX_RECENT_EVENTS', 20, int)
+APPEARANCE_DUMP_INTERVAL = get_config('APPEARANCE_DUMP_INTERVAL', 5, int)  # 每 N 个分段 dump 一次
 
 
 class RecordingSession:
@@ -48,6 +61,7 @@ class RecordingSession:
     - 在 recordings/ 下为每个会话创建独立目录
     - 接收Android端封装的MP4分段
     - 如果启用实时处理，将MP4分段加入处理队列
+    - 支持动态上下文（人物外貌缓存、事件上下文）
     """
     def __init__(self, client_id: str, enable_realtime_processing: bool = False):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -62,6 +76,13 @@ class RecordingSession:
         self.processing_queue: Optional[asyncio.Queue] = None
         self.processing_task: Optional[asyncio.Task] = None
         
+        # 动态上下文相关
+        self.appearance_cache: Optional[AppearanceCache] = None
+        self.event_context: Optional[EventContext] = None
+        self.db_client: Optional[SeekDBClient] = None
+        self.log_writer: Optional[SimpleLogWriter] = None
+        self.video_processor: Optional[Qwen3VLProcessor] = None
+        
         # 统计字段
         self.processed_segments_count = 0
         self.total_temp_size_mb = 0.0
@@ -72,6 +93,67 @@ class RecordingSession:
         
         # 分段计数器（用于统计）
         self.segment_count = 0
+        
+        # 外貌缓存文件路径
+        self.appearance_cache_path = DEBUG_LOG_DIR / "appearances_today.json"
+    
+    def init_dynamic_context(self):
+        """初始化动态上下文组件"""
+        if not DYNAMIC_CONTEXT_ENABLED:
+            return
+        
+        try:
+            # 创建数据库客户端
+            self.db_client = SeekDBClient()
+            
+            # 创建人物外貌缓存（尝试从文件加载）
+            self.appearance_cache = AppearanceCache()
+            if self.appearance_cache_path.exists():
+                loaded = self.appearance_cache.load_from_file(str(self.appearance_cache_path))
+                if loaded:
+                    print(f"[Context]: 加载外貌缓存成功，共 {self.appearance_cache.get_record_count()} 条记录")
+            
+            # 创建事件上下文
+            self.event_context = EventContext(self.db_client)
+            
+            # 创建日志写入器（不加密）
+            self.log_writer = SimpleLogWriter(self.db_client)
+            
+            # 创建视频处理器（使用动态上下文）
+            self.video_processor = Qwen3VLProcessor(
+                appearance_cache=self.appearance_cache,
+                event_context=self.event_context,
+                max_recent_events=MAX_RECENT_EVENTS
+            )
+            
+            print(f"[Context]: 动态上下文初始化成功")
+        except Exception as e:
+            print(f"[Context]: 动态上下文初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
+            # 回退到非动态上下文模式
+            self._cleanup_context()
+    
+    def _cleanup_context(self):
+        """清理动态上下文资源"""
+        if self.event_context:
+            self.event_context.close()
+            self.event_context = None
+        if self.db_client:
+            self.db_client.close()
+            self.db_client = None
+        self.appearance_cache = None
+        self.log_writer = None
+        self.video_processor = None
+    
+    def dump_appearance_cache(self):
+        """保存外貌缓存到文件"""
+        if self.appearance_cache:
+            try:
+                self.appearance_cache.dump_to_file(str(self.appearance_cache_path))
+                print(f"[Context]: 外貌缓存已保存，共 {self.appearance_cache.get_record_count()} 条记录")
+            except Exception as e:
+                print(f"[Context]: 保存外貌缓存失败: {e}")
     
     def handle_mp4_segment(self, segment_id: str, mp4_data: bytes, qr_results: Optional[List] = None):
         """
@@ -111,13 +193,17 @@ class RecordingSession:
             self.processing_queue.put_nowait(segment_info)
     
     def close(self):
-        """关闭会话（不再需要关闭文件）"""
-        pass
+        """关闭会话"""
+        # 保存外貌缓存
+        self.dump_appearance_cache()
+        # 清理动态上下文资源
+        self._cleanup_context()
 
     async def finalize(self) -> Optional[Path]:
         """
         结束会话：
         - 如果启用实时处理，等待处理队列完成
+        - 保存外貌缓存
         """
         # 如果启用实时处理，等待处理队列完成
         if self.enable_realtime_processing and self.processing_task:
@@ -129,6 +215,9 @@ class RecordingSession:
                 print(f"[Warning]: Processing task timeout after 30 seconds")
             except Exception as e:
                 print(f"[Error]: Error waiting for processing task: {e}")
+        
+        # 保存外貌缓存
+        self.dump_appearance_cache()
         
         print(f"[Info]: Recording session finalized. Processed {self.segment_count} segments.")
         return None
@@ -161,11 +250,11 @@ def extract_first_frame_from_mp4(mp4_path: Path, output_path: Path) -> Optional[
     return output_path
 
 
-async def process_segment_queue(session: RecordingSession, pipeline: VideoLogPipeline):
+async def process_segment_queue_dynamic(session: RecordingSession):
     """
-    后台串行处理分段队列（不阻塞接收）
+    后台串行处理分段队列（动态上下文版本）
     
-    注意：这个函数会一直运行直到会话结束（raw_file关闭）或任务被取消
+    使用动态上下文进行视频理解，维护人物外貌缓存
     """
     while True:
         try:
@@ -189,22 +278,56 @@ async def process_segment_queue(session: RecordingSession, pipeline: VideoLogPip
                     qr_results=segment_info.get('qr_results', [])
                 )
                 
-                # 视频理解（可能较慢，但不阻塞接收）
-                # 将视频理解和缩略图提取放到后台线程，避免阻塞事件循环
                 loop = asyncio.get_event_loop()
                 
-                # 视频理解（同步调用，但已在后台任务中）
+                # 获取最近事件和最大事件编号
+                recent_events = []
+                max_event_id = 0
+                if session.event_context:
+                    recent_events = session.event_context.get_recent_events(MAX_RECENT_EVENTS)
+                    max_event_id = session.event_context.get_max_event_id_number()
+                
+                # 视频理解（使用动态上下文）
                 video_process_start = time.time()
-                result = await loop.run_in_executor(
-                    None,
-                    pipeline.video_processor.process_segment,
-                    segment
-                )
+                
+                if session.video_processor and session.appearance_cache:
+                    # 使用动态上下文处理
+                    result = await loop.run_in_executor(
+                        None,
+                        session.video_processor.process_segment_with_context,
+                        segment,
+                        session.appearance_cache,
+                        recent_events,
+                        max_event_id
+                    )
+                    
+                    # 应用外貌更新
+                    await loop.run_in_executor(
+                        None,
+                        session.video_processor._apply_appearance_updates,
+                        result.appearance_updates
+                    )
+                    
+                    events = result.events
+                    appearance_update_count = len(result.appearance_updates)
+                else:
+                    # 回退到旧模式
+                    from orchestration.pipeline import VideoLogPipeline
+                    pipeline = VideoLogPipeline(enable_indexing=False)
+                    result = await loop.run_in_executor(
+                        None,
+                        pipeline.video_processor.process_segment,
+                        segment
+                    )
+                    events = result.events
+                    appearance_update_count = 0
+                
                 video_process_time = time.time() - video_process_start
                 
                 # 写入日志
-                for event in result.events:
-                    pipeline.log_writer.write_event_log(event)
+                if session.log_writer:
+                    for event in events:
+                        session.log_writer.write_event_log(event)
                 
                 # 提取缩略图（从MP4的第一帧）
                 segment_mp4_path = Path(segment_info['segment_path'])
@@ -241,7 +364,8 @@ async def process_segment_queue(session: RecordingSession, pipeline: VideoLogPip
                     'segment_duration': segment_duration,
                     'processing_time': processing_time,
                     'queue_length': queue_length,
-                    'events_count': len(result.events),
+                    'events_count': len(events),
+                    'appearance_updates': appearance_update_count,
                     'mp4_size_mb': mp4_size_mb,
                     'total_temp_size_mb': total_size_mb,
                     'processed_segments_count': session.processed_segments_count
@@ -253,28 +377,37 @@ async def process_segment_queue(session: RecordingSession, pipeline: VideoLogPip
                     session.monitor.log_segment_processing(stats)
 
                 # 精简单行日志
+                appearance_info = ""
+                if session.appearance_cache:
+                    appearance_info = f", 外貌更新={appearance_update_count}, 外貌总数={session.appearance_cache.get_record_count()}"
+                
                 print(
-                    "[Realtime] 分段 {sid}: 包含事件数={ev}, 时长={dur:.1f}s, 处理={proc:.2f}s, "
-                    "MP4={size:.2f}MB, 临时文件={tmp:.2f}MB, 已处理分段数={cnt}, 队列={q}".format(
+                    "[Realtime] 分段 {sid}: 事件数={ev}{app}, 时长={dur:.1f}s, 处理={proc:.2f}s, "
+                    "MP4={size:.2f}MB, 已处理={cnt}, 队列={q}".format(
                         sid=segment_info['segment_id'],
-                        ev=len(result.events),
+                        ev=len(events),
+                        app=appearance_info,
                         dur=segment_duration,
                         proc=processing_time,
                         size=mp4_size_mb,
-                        tmp=total_size_mb,
                         cnt=session.processed_segments_count,
                         q=queue_length,
                     )
                 )
                 
+                # 周期性保存外貌缓存
+                if session.processed_segments_count % APPEARANCE_DUMP_INTERVAL == 0:
+                    session.dump_appearance_cache()
+                
             except Exception as e:
                 print(f"[Realtime] 处理分段失败: {e}")
+                import traceback
+                traceback.print_exc()
             
             session.processing_queue.task_done()
             
         except asyncio.TimeoutError:
             # 继续等待，可能还有分段会加入队列
-            # 不打印日志，避免日志过多
             continue
         except asyncio.CancelledError:
             break
@@ -300,14 +433,18 @@ async def start_recording(websocket, client_id: str):
     # 如果启用实时处理，创建处理队列和任务
     if session.enable_realtime_processing:
         session.processing_queue = asyncio.Queue()
-        # 创建处理流程（共享实例，避免重复创建）
-        # 索引不再由视频处理触发，统一由独立脚本处理
-        pipeline = VideoLogPipeline(enable_indexing=False)
+        
+        # 初始化动态上下文
+        if DYNAMIC_CONTEXT_ENABLED:
+            session.init_dynamic_context()
+        
         # 启动后台处理任务
         session.processing_task = asyncio.create_task(
-            process_segment_queue(session, pipeline)
+            process_segment_queue_dynamic(session)
         )
-        print(f"[Info]: Started recording session with realtime processing at {session.session_dir}")
+        
+        context_info = "（动态上下文）" if session.appearance_cache else ""
+        print(f"[Info]: Started recording session with realtime processing{context_info} at {session.session_dir}")
     else:
         print(f"[Info]: Started recording session at {session.session_dir}")
 
@@ -355,6 +492,9 @@ async def finalize_recording(websocket, client_id: str):
         print(f"[Info]: MP4 saved to {mp4_path}")
     else:
         print("[Info]: Recording session finalized.")
+    
+    # 清理会话资源
+    session.close()
 
 
 # This handler manages receiving messages from a client
@@ -368,8 +508,6 @@ async def consumer_handler(websocket):
     
     try:
         message_count = 0
-        # 确保WebSocket连接支持ping/pong
-        # websockets库的ping_interval和ping_timeout在serve()中设置，会自动应用到所有连接
         async for message in websocket:
             message_count += 1
             receive_time = time.time()
@@ -398,7 +536,6 @@ async def consumer_handler(websocket):
                         # Base64解码MP4数据（在后台线程执行，避免阻塞消息接收）
                         try:
                             decode_start = time.time()
-                            # 将Base64解码放到后台线程，避免阻塞WebSocket消息接收循环
                             loop = asyncio.get_event_loop()
                             mp4_data = await loop.run_in_executor(
                                 None, 
@@ -406,7 +543,6 @@ async def consumer_handler(websocket):
                                 base64_data
                             )
                             decode_time = time.time() - decode_start
-                            # handle_mp4_segment是同步的，也放到后台线程执行
                             await loop.run_in_executor(
                                 None,
                                 session.handle_mp4_segment,
@@ -433,7 +569,6 @@ async def consumer_handler(websocket):
                         elif status == "capture_stopped":
                             await finalize_recording(websocket, client_id)
                 except (json.JSONDecodeError, TypeError) as e:
-                    # 不是我们关心的 JSON，忽略
                     print(f"[Warning]: Failed to parse JSON message from {client_id}: {e}")
                     pass
             else:
@@ -444,7 +579,6 @@ async def consumer_handler(websocket):
         print(f"[Connection]: Client {client_id} disconnected: code={e.code}, reason={e.reason}")
         if e.code == 1006:
             print(f"[Warning]: 连接异常关闭 (1006)，可能是网络中断或超时")
-            # 检查是否有未处理的分段
             session = RECORDING_SESSIONS.get(websocket)
             if session and session.enable_realtime_processing and session.processing_queue:
                 queue_size = session.processing_queue.qsize()
@@ -466,10 +600,7 @@ async def consumer_handler(websocket):
 # This handler manages the overall connection for a client
 async def connection_handler(websocket):
     """
-    新客户端连接入口：
-    - 记录客户端 ID 与请求路径
-    - 将连接加入 CONNECTED_CLIENTS，方便广播控制命令
-    - 委托给 consumer_handler 处理具体收发逻辑
+    新客户端连接入口
     """
     CONNECTED_CLIENTS.add(websocket)
     client_id = f"{websocket.remote_address[0]}_{websocket.remote_address[1]}"
@@ -478,8 +609,6 @@ async def connection_handler(websocket):
         f"[Connection]: New client {client_id} connected from {path}. Total clients: {len(CONNECTED_CLIENTS)}"
     )
     try:
-        # 设置WebSocket的ping/pong机制，确保连接保持活跃
-        # websockets库会自动处理ping/pong，但我们需要确保连接对象支持
         await consumer_handler(websocket)
     except websockets.exceptions.ConnectionClosed as e:
         print(f"[Connection]: Connection closed in connection_handler: code={e.code}, reason={e.reason}")
@@ -495,16 +624,13 @@ async def connection_handler(websocket):
 async def broadcast(message):
     """
     将控制命令广播给所有已连接客户端。
-    当前主要用于从终端向所有 Android App 发送 start/stop_capture 指令。
     """
     if CONNECTED_CLIENTS:
         print(f"[Broadcast]: Sending to {len(CONNECTED_CLIENTS)} client(s): {message}")
-        # 使用 gather 而不是 wait，以便正确处理断开连接的客户端
         results = await asyncio.gather(
             *[client.send(message) for client in CONNECTED_CLIENTS],
             return_exceptions=True
         )
-        # 记录发送失败的客户端
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 print(f"[Broadcast]: Failed to send to a client: {result}")
@@ -518,7 +644,6 @@ async def terminal_input_handler():
     终端交互：
     - 支持在服务器命令行输入 start/stop 命令
     - 将命令转换为 JSON 下发到所有已连接客户端
-    - start 命令可携带分辨率 / 码率 / 目标 FPS
     """
     loop = asyncio.get_running_loop()
     while True:
@@ -536,14 +661,9 @@ async def terminal_input_handler():
             command = parts[0]
 
             if command == "start":
-                # 默认参数：码率和 FPS；宽高比是否下发由命令是否携带参数决定
-                aspect_width, aspect_height = 4, 3  # 默认宽高比，仅在带参数时才下发
-                bitrate_mb = 1.0  # 默认 1 MB（会在客户端转换为 bps）
-                fps = 10  # 默认 10 FPS
-
-                # 是否由服务器显式指定宽高比：
-                # - 纯 "start"           -> 不下发 aspectRatio 字段，交由客户端使用当前 UI 选择的宽高比
-                # - "start 4:3 ..." 等   -> 在 payload 中下发 aspectRatio，强制客户端使用该宽高比
+                aspect_width, aspect_height = 4, 3
+                bitrate_mb = 1.0
+                fps = 10
                 include_aspect_ratio = len(parts) > 1
 
                 if include_aspect_ratio:
@@ -552,9 +672,7 @@ async def terminal_input_handler():
                         if aspect_width <= 0 or aspect_height <= 0:
                             raise ValueError("Aspect ratio must be positive")
                     except (ValueError, IndexError):
-                        print(
-                            "[Error]: Invalid aspect ratio format. Use 'WIDTH:HEIGHT', e.g., '4:3' or '16:9'. Using default 4:3."
-                        )
+                        print("[Error]: Invalid aspect ratio format. Using default 4:3.")
                         aspect_width, aspect_height = 4, 3
 
                 if len(parts) > 2:
@@ -563,27 +681,23 @@ async def terminal_input_handler():
                         if bitrate_mb <= 0:
                             raise ValueError("Bitrate must be positive")
                     except ValueError:
-                        print(
-                            "[Error]: Invalid bitrate. Expecting positive number (MB). Using default 1 MB."
-                        )
+                        print("[Error]: Invalid bitrate. Using default 1 MB.")
                         bitrate_mb = 1.0
 
                 if len(parts) > 3:
                     try:
                         fps = int(parts[3])
                         if fps < 0:
-                            fps = 10  # Default to 10 FPS if invalid
+                            fps = 10
                     except ValueError:
-                        print(
-                            "[Error]: Invalid fps. Expecting integer. Using 10 FPS."
-                        )
+                        print("[Error]: Invalid fps. Using 10 FPS.")
                         fps = 10
 
                 payload = {
                     "format": "h264",
-                    "bitrate": int(bitrate_mb) if isinstance(bitrate_mb, float) and bitrate_mb.is_integer() else bitrate_mb,  # In MB, client will convert to bps
+                    "bitrate": int(bitrate_mb) if isinstance(bitrate_mb, float) and bitrate_mb.is_integer() else bitrate_mb,
                     "fps": fps,
-                    "segmentDuration": REALTIME_TARGET_SEGMENT_DURATION,  # 分段时长（秒）
+                    "segmentDuration": REALTIME_TARGET_SEGMENT_DURATION,
                 }
                 if include_aspect_ratio:
                     payload["aspectRatio"] = {
@@ -591,12 +705,10 @@ async def terminal_input_handler():
                         "height": aspect_height,
                     }
 
-                message = json.dumps(
-                    {
-                        "command": "start_capture",
-                        "payload": payload,
-                    }
-                )
+                message = json.dumps({
+                    "command": "start_capture",
+                    "payload": payload,
+                })
                 await broadcast(message)
 
             elif command == "stop":
@@ -614,26 +726,22 @@ async def terminal_input_handler():
 
 # The main function to start the server and the terminal handler
 async def main(host: str = "0.0.0.0", port: int = 50002):
-    # 设置WebSocket ping_interval和ping_timeout，保持连接活跃
-    # ping_interval: 每20秒发送一次ping
-    # ping_timeout: 等待pong响应的超时时间（10秒）
-    # Android 端每段 MP4 约 0.5~1.5 MB，Base64 后会膨胀约 1.33 倍。
-    # websockets 默认 max_size=1MB，会在第二段（~1.7MB）时触发 1009/1006 断开。
-    # 将 max_size 提高到 10MB 以容纳 15s 分段，避免首段后即被服务器强制断开。
     server_task = websockets.serve(
         connection_handler, 
         host, 
         port,
-        ping_interval=20,  # 每20秒发送一次ping
-        ping_timeout=10,   # 等待pong响应的超时时间
-        close_timeout=10,  # 关闭连接的超时时间
-        max_size=10 * 1024 * 1024  # 允许更大的 Base64 MP4 消息
+        ping_interval=20,
+        ping_timeout=10,
+        close_timeout=10,
+        max_size=10 * 1024 * 1024
     )
     async with server_task:
         print(f"WebSocket server started at ws://{host}:{port}")
         print("You can now connect your Android Camera App.")
         if REALTIME_PROCESSING_ENABLED:
             print(f"[Info]: Realtime processing enabled (target segment duration: {REALTIME_TARGET_SEGMENT_DURATION}s)")
+        if DYNAMIC_CONTEXT_ENABLED:
+            print(f"[Info]: Dynamic context enabled (max recent events: {MAX_RECENT_EVENTS})")
         terminal_task = asyncio.create_task(terminal_input_handler())
         await asyncio.gather(terminal_task)
 
@@ -648,4 +756,3 @@ if __name__ == "__main__":
         asyncio.run(main(args.host, args.port))
     except KeyboardInterrupt:
         print("\nServer shutting down.")
-

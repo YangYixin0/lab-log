@@ -1,26 +1,58 @@
-"""Qwen3-VL 视频理解处理器"""
+"""Qwen3-VL 视频理解处理器（动态上下文版本）"""
 
 import os
 import json
-import uuid
-from datetime import datetime, timedelta
+import re
+from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from dashscope import MultiModalConversation
 
 from video_processing.interface import VideoProcessor
 from storage.models import VideoSegment, VideoUnderstandingResult, EventLog
+from context.appearance_cache import AppearanceCache
+from context.event_context import EventContext
+from context.prompt_builder import PromptBuilder
 
 # 加载环境变量
 load_dotenv()
 
 
+@dataclass
+class AppearanceUpdate:
+    """外貌更新操作"""
+    op: str  # add, update, merge
+    target_person_id: str
+    merge_from: Optional[str] = None
+    appearance: Optional[str] = None
+    user_id: Optional[str] = None
+
+
+@dataclass
+class ProcessingResult:
+    """处理结果（包含事件和外貌更新）"""
+    events: List[EventLog]
+    appearance_updates: List[AppearanceUpdate]
+    raw_response: str
+
+
 class Qwen3VLProcessor(VideoProcessor):
-    """Qwen3-VL Flash 视频理解处理器"""
+    """Qwen3-VL Flash 视频理解处理器（动态上下文版本）"""
     
-    def __init__(self, api_key: str = None, model: str = "qwen3-vl-flash", fps: float = 1.0, enable_thinking: bool = True, thinking_budget: int = 8192):
+    def __init__(
+        self,
+        api_key: str = None,
+        model: str = "qwen3-vl-flash",
+        fps: float = 1.0,
+        enable_thinking: bool = True,
+        thinking_budget: int = 8192,
+        appearance_cache: Optional[AppearanceCache] = None,
+        event_context: Optional[EventContext] = None,
+        max_recent_events: int = 20
+    ):
         """
         初始化处理器
         
@@ -29,7 +61,10 @@ class Qwen3VLProcessor(VideoProcessor):
             model: 模型名称，默认 qwen3-vl-flash
             fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧
             enable_thinking: 是否启用思考，默认 True
-            thinking_budget: 思考预算，默认 8192 tokens。qwen3-vl-flash最大支持 81920 tokens
+            thinking_budget: 思考预算，默认 8192 tokens
+            appearance_cache: 人物外貌缓存，如果为 None 则创建默认实例
+            event_context: 事件上下文，如果为 None 则创建默认实例
+            max_recent_events: 最大最近事件数，默认 20
         """
         self.api_key = api_key or os.getenv('DASHSCOPE_API_KEY')
         if not self.api_key:
@@ -39,6 +74,15 @@ class Qwen3VLProcessor(VideoProcessor):
         self.fps = fps
         self.enable_thinking = enable_thinking
         self.thinking_budget = thinking_budget
+        
+        # 动态上下文相关
+        self.appearance_cache = appearance_cache or AppearanceCache()
+        self.event_context = event_context
+        self.max_recent_events = max_recent_events
+        self.prompt_builder = PromptBuilder(max_recent_events)
+        
+        # 是否使用动态上下文（通过检查是否有 event_context 来判断）
+        self._use_dynamic_context = event_context is not None
     
     def process_segment(self, segment: VideoSegment) -> VideoUnderstandingResult:
         """
@@ -52,10 +96,6 @@ class Qwen3VLProcessor(VideoProcessor):
         """
         video_path = segment.video_path
         
-        # 如果 segment.video_path 包含时间范围信息（非临时文件），需要提取分段
-        # 这里假设 segment.video_path 是完整的视频路径
-        # 如果需要处理时间范围，需要先提取分段
-        
         # 构建视频文件路径（file:// 协议）
         if Path(video_path).is_absolute():
             video_url = f"file://{video_path}"
@@ -63,10 +103,112 @@ class Qwen3VLProcessor(VideoProcessor):
             video_url = f"file://{os.path.abspath(video_path)}"
         
         # 构建 prompt
-        prompt = self._build_prompt(segment)
+        if self._use_dynamic_context:
+            prompt = self._build_dynamic_prompt(segment)
+        else:
+            prompt = self._build_legacy_prompt(segment)
         
         # 调用 API
         messages = [
+            {
+                'role': 'user',
+                'content': [
+                    {'video': video_url, 'fps': self.fps},
+                    {'text': prompt}
+                ]
+            }
+        ]
+        
+        # 如果使用动态上下文，添加系统指令
+        if self._use_dynamic_context:
+            system_instruction = self.prompt_builder.build_system_instruction()
+            messages.insert(0, {
+                'role': 'system',
+                'content': system_instruction
+            })
+        
+        try:
+            response = MultiModalConversation.call(
+                api_key=self.api_key,
+                model=self.model,
+                messages=messages,
+                stream=False,
+                enable_thinking=self.enable_thinking,
+                thinking_budget=self.thinking_budget
+            )
+            
+            # 解析响应
+            result_text = response["output"]["choices"][0]["message"].content[0]["text"]
+            
+            if self._use_dynamic_context:
+                # 解析动态上下文响应
+                processing_result = self._parse_dynamic_response(result_text, segment)
+                
+                # 应用外貌更新
+                self._apply_appearance_updates(processing_result.appearance_updates)
+                
+                return VideoUnderstandingResult(
+                    segment_id=segment.segment_id,
+                    remark=result_text,
+                    events=processing_result.events
+                )
+            else:
+                # 使用旧的解析逻辑
+                events = self._parse_legacy_response(result_text, segment)
+                return VideoUnderstandingResult(
+                    segment_id=segment.segment_id,
+                    remark=result_text,
+                    events=events
+                )
+        except Exception as e:
+            raise RuntimeError(f"视频理解 API 调用失败: {e}")
+    
+    def process_segment_with_context(
+        self,
+        segment: VideoSegment,
+        appearance_cache: AppearanceCache,
+        recent_events: List[Dict[str, Any]],
+        max_event_id: int
+    ) -> ProcessingResult:
+        """
+        使用动态上下文处理视频分段
+        
+        Args:
+            segment: 视频分段
+            appearance_cache: 人物外貌缓存
+            recent_events: 最近事件列表
+            max_event_id: 当前最大事件编号数字
+        
+        Returns:
+            处理结果（包含事件和外貌更新）
+        """
+        video_path = segment.video_path
+        
+        # 构建视频文件路径
+        if Path(video_path).is_absolute():
+            video_url = f"file://{video_path}"
+        else:
+            video_url = f"file://{os.path.abspath(video_path)}"
+        
+        # 获取最大人物编号
+        max_person_id = appearance_cache.get_max_person_id_number()
+        
+        # 构建动态提示词
+        prompt = self.prompt_builder.build_dynamic_prompt(
+            segment=segment,
+            qr_results=segment.qr_results,
+            recent_events=recent_events,
+            appearance_cache=appearance_cache,
+            max_event_id=max_event_id,
+            max_person_id=max_person_id
+        )
+        
+        # 构建消息
+        messages = [
+            {
+                'role': 'system',
+                'content': self.prompt_builder.build_system_instruction()
+            },
             {
                 'role': 'user',
                 'content': [
@@ -86,22 +228,213 @@ class Qwen3VLProcessor(VideoProcessor):
                 thinking_budget=self.thinking_budget
             )
             
-            # 解析响应
             result_text = response["output"]["choices"][0]["message"].content[0]["text"]
+            return self._parse_dynamic_response(result_text, segment)
             
-            # 解析结构化结果
-            events = self._parse_response(result_text, segment)
-            
-            return VideoUnderstandingResult(
-                segment_id=segment.segment_id,
-                remark=result_text,  # 保存原始响应作为备注
-                events=events
-            )
         except Exception as e:
             raise RuntimeError(f"视频理解 API 调用失败: {e}")
     
-    def _build_prompt(self, segment: VideoSegment) -> str:
-        """构建提示词"""
+    def _build_dynamic_prompt(self, segment: VideoSegment) -> str:
+        """使用动态上下文构建提示词"""
+        # 获取最近事件
+        recent_events = []
+        max_event_id = 0
+        if self.event_context:
+            recent_events = self.event_context.get_recent_events(self.max_recent_events)
+            max_event_id = self.event_context.get_max_event_id_number()
+        
+        # 获取最大人物编号
+        max_person_id = self.appearance_cache.get_max_person_id_number()
+        
+        return self.prompt_builder.build_dynamic_prompt(
+            segment=segment,
+            qr_results=segment.qr_results,
+            recent_events=recent_events,
+            appearance_cache=self.appearance_cache,
+            max_event_id=max_event_id,
+            max_person_id=max_person_id
+        )
+    
+    def _parse_dynamic_response(
+        self,
+        response_text: str,
+        segment: VideoSegment
+    ) -> ProcessingResult:
+        """
+        解析动态上下文响应
+        
+        Args:
+            response_text: API 返回的文本
+            segment: 视频分段
+        
+        Returns:
+            处理结果
+        """
+        events = []
+        appearance_updates = []
+        
+        # 提取 JSON
+        json_str = self._extract_json(response_text)
+        if not json_str:
+            return ProcessingResult(events=[], appearance_updates=[], raw_response=response_text)
+        
+        try:
+            data = json.loads(json_str)
+            
+            # 解析事件
+            events_data = data.get('events_to_append', [])
+            for event_data in events_data:
+                try:
+                    event = self._parse_event(event_data, segment)
+                    if event:
+                        events.append(event)
+                except Exception as e:
+                    print(f"警告：解析事件失败: {e}")
+                    continue
+            
+            # 解析外貌更新
+            updates_data = data.get('appearance_updates', [])
+            for update_data in updates_data:
+                try:
+                    update = self._parse_appearance_update(update_data)
+                    if update:
+                        appearance_updates.append(update)
+                except Exception as e:
+                    print(f"警告：解析外貌更新失败: {e}")
+                    continue
+            
+        except json.JSONDecodeError as e:
+            print(f"警告：无法解析 JSON 响应: {e}")
+            print(f"响应文本: {response_text[:500]}")
+        
+        return ProcessingResult(
+            events=events,
+            appearance_updates=appearance_updates,
+            raw_response=response_text
+        )
+    
+    def _extract_json(self, text: str) -> Optional[str]:
+        """从文本中提取 JSON"""
+        # 尝试找到 JSON 代码块
+        code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
+        if code_block_match:
+            return code_block_match.group(1)
+        
+        # 尝试直接找到 JSON 对象
+        json_start = text.find('{')
+        json_end = text.rfind('}') + 1
+        
+        if json_start != -1 and json_end > json_start:
+            return text[json_start:json_end]
+        
+        return None
+    
+    def _parse_event(self, event_data: Dict[str, Any], segment: VideoSegment) -> Optional[EventLog]:
+        """解析单个事件"""
+        try:
+            # 解析时间
+            start_time_str = event_data.get('start_time', '')
+            end_time_str = event_data.get('end_time', '')
+            
+            try:
+                start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                # 如果解析失败，使用当前时间
+                start_time = datetime.now()
+                end_time = datetime.now()
+            
+            # 获取事件 ID
+            event_id = event_data.get('event_id', '')
+            if not event_id:
+                return None
+            
+            # 验证 event_type
+            event_type = event_data.get('event_type', '')
+            if event_type not in ['person', 'equipment-only']:
+                print(f"警告：无效的 event_type '{event_type}'，必须是 'person' 或 'equipment-only'，已跳过事件 {event_id}")
+                return None
+            
+            # 获取 person_ids（支持多人）
+            person_ids = event_data.get('person_ids', [])
+            if not isinstance(person_ids, list):
+                print(f"警告：person_ids 必须是数组，已跳过事件 {event_id}")
+                return None
+            
+            # 验证 equipment-only 事件的 person_ids 应为空
+            if event_type == 'equipment-only' and person_ids:
+                print(f"警告：equipment-only 事件的 person_ids 应为空数组，已自动修正事件 {event_id}")
+                person_ids = []
+            
+            # 构建 structured 数据（新格式）
+            structured = {
+                'person_ids': person_ids,
+                'equipment': event_data.get('equipment', ''),
+            }
+            
+            return EventLog(
+                event_id=event_id,
+                segment_id=segment.segment_id,
+                start_time=start_time,
+                end_time=end_time,
+                event_type=event_type,
+                structured=structured,
+                raw_text=event_data.get('description', '')
+            )
+        except Exception as e:
+            print(f"解析事件异常: {e}")
+            return None
+    
+    def _parse_appearance_update(self, update_data: Dict[str, Any]) -> Optional[AppearanceUpdate]:
+        """解析单个外貌更新"""
+        op = update_data.get('op')
+        target_person_id = update_data.get('target_person_id')
+        
+        if not op or not target_person_id:
+            return None
+        
+        return AppearanceUpdate(
+            op=op,
+            target_person_id=target_person_id,
+            merge_from=update_data.get('merge_from'),
+            appearance=update_data.get('appearance'),
+            user_id=update_data.get('user_id')
+        )
+    
+    def _apply_appearance_updates(self, updates: List[AppearanceUpdate]) -> None:
+        """应用外貌更新到缓存"""
+        for update in updates:
+            try:
+                if update.op == 'add':
+                    self.appearance_cache.add(
+                        person_id=update.target_person_id,
+                        appearance=update.appearance or '',
+                        user_id=update.user_id
+                    )
+                elif update.op == 'update':
+                    self.appearance_cache.update(
+                        person_id=update.target_person_id,
+                        appearance=update.appearance,
+                        user_id=update.user_id
+                    )
+                elif update.op == 'merge':
+                    if update.merge_from:
+                        # 先执行合并
+                        self.appearance_cache.merge(
+                            merge_from=update.merge_from,
+                            target_person_id=update.target_person_id
+                        )
+                        # 如果提供了新的外貌描述，更新目标记录
+                        if update.appearance:
+                            self.appearance_cache.update(
+                                person_id=update.target_person_id,
+                                appearance=update.appearance
+                            )
+            except Exception as e:
+                print(f"警告：应用外貌更新失败 ({update.op} {update.target_person_id}): {e}")
+    
+    def _build_legacy_prompt(self, segment: VideoSegment) -> str:
+        """构建旧版提示词（兼容模式）"""
         duration = segment.end_time - segment.start_time
         prompt = f"""请分析这段实验室视频（时长约 {duration:.1f} 秒），并记录所有观察到的事件。
 
@@ -132,8 +465,8 @@ class Qwen3VLProcessor(VideoProcessor):
     - hair_color: 头发颜色（字符串，可选，敏感信息，不可在其他字段中提及）
     - action: 人物动作的简短描述（字符串，如"走进画面"、"操作设备"、"坐下"、"看手机"等）
   - equipment: "person"事件中对象人物使用的设备，或"equipment-only"事件中对象设备（字符串，可选，如"离心机"、"笔记本电脑"等）
-  - tool: 对象人物使用的工具（字符串，可选，如“钳子”、“螺丝刀”、“镊子”等）
-  - chemicals: 对象人物使用的化学品（字符串，可选，如“氧化铅”、“白色粉末”、“无水乙醇”、“无色液体”等）
+  - tool: 对象人物使用的工具（字符串，可选，如"钳子"、"螺丝刀"、"镊子"等）
+  - chemicals: 对象人物使用的化学品（字符串，可选，如"氧化铅"、"白色粉末"、"无水乙醇"、"无色液体"等）
 - raw_text: 事件的自然语言描述，不提及具体时间和人物上衣颜色、头发颜色（字符串）
 
 **输出示例**：
@@ -153,59 +486,6 @@ class Qwen3VLProcessor(VideoProcessor):
         "equipment": "手机"
       }},
       "raw_text": "对象人物坐在一张黑色椅子上，面向离心机，正在看手机屏幕。"
-    }},
-    {{
-    "event_id": "evt_002",
-      "start_time": "2025-12-17T10:00:00",
-      "end_time": "2025-12-17T10:00:10",
-      "event_type": "equipment-only",
-      "structured": {{
-        "equipment": "离心机"
-      }},
-      "raw_text": "离心机上的一个示数在20附近变化，另一个示数固定在19.5。"
-    }},
-    {{
-      "event_id": "evt_003",
-      "start_time": "2025-12-17T10:00:08",
-      "end_time": "2025-12-17T10:00:10",
-      "event_type": "person",
-      "structured": {{
-        "person": {{
-          "upper_clothing_color": "橙色",
-          "hair_color": "黑色",
-          "action": "走进画面"
-        }}
-      }},
-      "raw_text": "对象人物从左侧走进画面，走到离心机旁。"
-    }},
-    {{
-      "event_id": "evt_004",
-      "start_time": "2025-12-17T10:00:10",
-      "end_time": "2025-12-17T10:00:56",
-      "event_type": "person",
-      "structured": {{
-        "person": {{
-          "upper_clothing_color": "橙色",
-          "hair_color": "黑色",
-          "action": "操作设备"
-        }},
-        "equipment": "离心机"
-      }},
-      "raw_text": "对象人物把一些离心管放入离心机。随后点击这台离心机面板上的按钮，离心机上的一个示数从20变化到大约30，另一个示数保持为19.5。"
-    }},
-    {{
-      "event_id": "evt_005",
-      "start_time": "2025-12-17T10:00:20",
-      "end_time": "2025-12-17T10:00:56",
-      "event_type": "person",
-      "structured": {{
-        "person": {{
-          "upper_clothing_color": "白色",
-          "hair_color": "黑色",
-          "action": "观察"
-        }}
-      }},
-      "raw_text": "对象人物站起来，放下手机，观察另一个人物操作离心机。"
     }}
   ]
 }}
@@ -216,65 +496,41 @@ class Qwen3VLProcessor(VideoProcessor):
 """
         return prompt
     
-    def _parse_response(self, response_text: str, segment: VideoSegment) -> List[EventLog]:
-        """
-        解析 API 响应，转换为 EventLog 列表
-        
-        Args:
-            response_text: API 返回的文本
-            segment: 视频分段
-        
-        Returns:
-            EventLog 列表
-        """
+    def _parse_legacy_response(self, response_text: str, segment: VideoSegment) -> List[EventLog]:
+        """解析旧版响应（兼容模式）"""
         events = []
         
-        # 尝试从响应中提取 JSON
-        json_start = response_text.find('{')
-        json_end = response_text.rfind('}') + 1
-        
-        if json_start == -1 or json_end == 0:
-            # 如果没有找到 JSON，返回空列表
+        json_str = self._extract_json(response_text)
+        if not json_str:
             return events
         
         try:
-            json_str = response_text[json_start:json_end]
             data = json.loads(json_str)
-            
             events_data = data.get('events', [])
             
-            # 如果没有 events 字段，尝试直接解析为事件数组
             if not events_data and isinstance(data, list):
                 events_data = data
             
             for event_data in events_data:
                 try:
-                    # 解析时间
                     start_time_str = event_data.get('start_time')
                     end_time_str = event_data.get('end_time')
                     
-                    # 如果时间字符串不完整，尝试解析
                     try:
                         start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
                         end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
                     except:
-                        # 如果解析失败，使用分段的时间范围作为默认值
-                        # 这里假设视频的开始时间是今天
+                        from datetime import timedelta
                         base_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                        # 从时间戳中提取时分秒（如果可能）
                         start_time = base_date + timedelta(seconds=segment.start_time)
                         end_time = base_date + timedelta(seconds=segment.end_time)
                     
-                    # 生成 event_id（添加分段标识符确保唯一性）
-                    original_event_id = event_data.get('event_id', f"evt_{uuid.uuid4().hex[:8]}")
-                    # 使用分段 ID 作为前缀，确保不同分段的事件 ID 唯一
+                    original_event_id = event_data.get('event_id', f"evt_{hash(str(event_data)) % 100000:05d}")
                     event_id = f"{segment.segment_id}_{original_event_id}"
                     
-                    # 提取 event_type（作为独立字段，不放入 structured）
                     event_type = event_data.get('event_type')
                     structured = event_data.get('structured', {})
                     
-                    # 构建 EventLog
                     event_log = EventLog(
                         event_id=event_id,
                         segment_id=segment.segment_id,
@@ -286,7 +542,6 @@ class Qwen3VLProcessor(VideoProcessor):
                     )
                     events.append(event_log)
                 except Exception as e:
-                    # 跳过无法解析的事件
                     print(f"警告：无法解析事件: {e}")
                     continue
         except json.JSONDecodeError as e:
@@ -294,4 +549,3 @@ class Qwen3VLProcessor(VideoProcessor):
             print(f"响应文本: {response_text[:500]}")
         
         return events
-

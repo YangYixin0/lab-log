@@ -36,8 +36,8 @@ def register(user_data: UserRegister, db: SeekDBClient = Depends(get_db)):
             detail="公钥是必填项"
         )
     
-    # 生成 user_id
-    user_id = str(uuid.uuid4())
+    # 生成 user_id（使用 16 字符的短 UUID）
+    user_id = uuid.uuid4().hex[:16]
     
     # 哈希密码（密码是必填项）
     password_hash = hash_password(user_data.password)
