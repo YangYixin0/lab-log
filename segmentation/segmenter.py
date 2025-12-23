@@ -132,7 +132,8 @@ class VideoSegmenter:
                 segment_id=segment_id,
                 video_path=segment_path,
                 start_time=actual_start_time,
-                end_time=actual_end_time
+                end_time=actual_end_time,
+                qr_results=[]
             )
             segments.append(segment)
             
@@ -258,7 +259,8 @@ class VideoSegmenter:
                 segment_id=segment_id,
                 video_path=segment_path,
                 start_time=current_time,
-                end_time=end_time
+                end_time=end_time,
+                qr_results=[]
             )
             segments.append(segment)
             

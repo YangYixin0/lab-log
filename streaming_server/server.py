@@ -39,7 +39,6 @@ REALTIME_PROCESSING_ENABLED = get_config('REALTIME_PROCESSING_ENABLED', True, bo
 REALTIME_TARGET_SEGMENT_DURATION = get_config('REALTIME_TARGET_SEGMENT_DURATION', 60.0, float)
 REALTIME_QUEUE_ALERT_THRESHOLD = get_config('REALTIME_QUEUE_ALERT_THRESHOLD', 10, int)
 REALTIME_CLEANUP_H264 = get_config('REALTIME_CLEANUP_H264', True, bool)
-REALTIME_INDEXING_ENABLED = get_config('REALTIME_INDEXING_ENABLED', False, bool)
 
 
 class RecordingSession:
@@ -73,16 +72,23 @@ class RecordingSession:
         # 分段计数器（用于统计）
         self.segment_count = 0
     
-    def handle_mp4_segment(self, segment_id: str, mp4_data: bytes):
+    def handle_mp4_segment(self, segment_id: str, mp4_data: bytes, qr_results: Optional[List] = None):
         """
         处理接收到的MP4分段：
         - 保存MP4文件到会话目录
         - 生成时间戳
         - 加入处理队列（如果启用实时处理）
         """
+        qr_results = qr_results or []
         # 保存MP4文件（使用segment_id作为文件名，已包含时间戳和序号）
         segment_path = self.session_dir / f"{segment_id}.mp4"
         segment_path.write_bytes(mp4_data)
+        # 保存二维码识别结果
+        qr_path = self.session_dir / f"{segment_id}_qr.json"
+        try:
+            qr_path.write_text(json.dumps(qr_results, ensure_ascii=False, indent=2))
+        except Exception as e:
+            print(f"[Warning]: Failed to save QR results for {segment_id}: {e}")
         
         # 生成时间戳（从segment_id中提取，格式：YYYYMMDD_HHMMSS_XX）
         # 如果无法解析，使用当前时间
@@ -113,13 +119,14 @@ class RecordingSession:
         print(f"[Info]: Saved MP4 segment {segment_id} ({len(mp4_data)} bytes) to {segment_path}")
         
         # 如果启用实时处理，加入处理队列
-        if self.enable_realtime_processing and self.processing_queue:
+            if self.enable_realtime_processing and self.processing_queue:
             segment_info = {
                 'segment_id': segment_id,
                 'segment_path': str(segment_path),
                 'start_time': start_time,
-                'end_time': end_time,
-                'mp4_size_mb': len(mp4_data) / (1024 * 1024)
+                    'end_time': end_time,
+                    'mp4_size_mb': len(mp4_data) / (1024 * 1024),
+                    'qr_results': qr_results
             }
             self.processing_queue.put_nowait(segment_info)
     
@@ -198,7 +205,8 @@ async def process_segment_queue(session: RecordingSession, pipeline: VideoLogPip
                     segment_id=segment_info['segment_id'],
                     video_path=segment_info['segment_path'],
                     start_time=segment_info['start_time'],
-                    end_time=segment_info['end_time']
+                    end_time=segment_info['end_time'],
+                    qr_results=segment_info.get('qr_results', [])
                 )
                 
                 # 视频理解（可能较慢，但不阻塞接收）
@@ -217,20 +225,6 @@ async def process_segment_queue(session: RecordingSession, pipeline: VideoLogPip
                 # 写入日志
                 for event in result.events:
                     pipeline.log_writer.write_event_log(event)
-                
-                # 索引事件（如果启用）
-                index_result = {'chunks': 0, 'success': 0, 'failed': 0}
-                if pipeline.enable_indexing and result.events:
-                    try:
-                        index_result = await loop.run_in_executor(
-                            None,
-                            pipeline.index_events,
-                            result.events
-                        )
-                    except Exception as e:
-                        print(f"[Indexing] 分段 {segment_info['segment_id']} 索引失败: {e}")
-                        import traceback
-                        traceback.print_exc()
                 
                 # 提取缩略图（从MP4的第一帧）
                 segment_mp4_path = Path(segment_info['segment_path'])
@@ -279,36 +273,19 @@ async def process_segment_queue(session: RecordingSession, pipeline: VideoLogPip
                     session.monitor.log_segment_processing(stats)
 
                 # 精简单行日志
-                if pipeline.enable_indexing and index_result['chunks'] > 0:
-                    print(
-                        "[Realtime] 分段 {sid}: 包含事件数={ev}, 索引={idx_chunks}块({idx_success}成功), 时长={dur:.1f}s, 处理={proc:.2f}s, "
-                        "MP4={size:.2f}MB, 临时文件={tmp:.2f}MB, 已处理分段数={cnt}, 队列={q}".format(
-                            sid=segment_info['segment_id'],
-                            ev=len(result.events),
-                            idx_chunks=index_result['chunks'],
-                            idx_success=index_result['success'],
-                            dur=segment_duration,
-                            proc=processing_time,
-                            size=mp4_size_mb,
-                            tmp=total_size_mb,
-                            cnt=session.processed_segments_count,
-                            q=queue_length,
-                        )
+                print(
+                    "[Realtime] 分段 {sid}: 包含事件数={ev}, 时长={dur:.1f}s, 处理={proc:.2f}s, "
+                    "MP4={size:.2f}MB, 临时文件={tmp:.2f}MB, 已处理分段数={cnt}, 队列={q}".format(
+                        sid=segment_info['segment_id'],
+                        ev=len(result.events),
+                        dur=segment_duration,
+                        proc=processing_time,
+                        size=mp4_size_mb,
+                        tmp=total_size_mb,
+                        cnt=session.processed_segments_count,
+                        q=queue_length,
                     )
-                else:
-                    print(
-                        "[Realtime] 分段 {sid}: 包含事件数={ev}, 时长={dur:.1f}s, 处理={proc:.2f}s, "
-                        "MP4={size:.2f}MB, 临时文件={tmp:.2f}MB, 已处理分段数={cnt}, 队列={q}".format(
-                            sid=segment_info['segment_id'],
-                            ev=len(result.events),
-                            dur=segment_duration,
-                            proc=processing_time,
-                            size=mp4_size_mb,
-                            tmp=total_size_mb,
-                            cnt=session.processed_segments_count,
-                            q=queue_length,
-                        )
-                    )
+                )
                 
             except Exception as e:
                 print(f"[Realtime] 处理分段失败: {e}")
@@ -344,8 +321,8 @@ async def start_recording(websocket, client_id: str):
     if session.enable_realtime_processing:
         session.processing_queue = asyncio.Queue()
         # 创建处理流程（共享实例，避免重复创建）
-        # 索引是否启用由环境变量 REALTIME_INDEXING_ENABLED 控制（默认 False）
-        pipeline = VideoLogPipeline(enable_indexing=REALTIME_INDEXING_ENABLED)
+        # 索引不再由视频处理触发，统一由独立脚本处理
+        pipeline = VideoLogPipeline(enable_indexing=False)
         # 启动后台处理任务
         session.processing_task = asyncio.create_task(
             process_segment_queue(session, pipeline)
@@ -431,6 +408,7 @@ async def consumer_handler(websocket):
                         
                         segment_id = data.get("segment_id")
                         base64_data = data.get("data")
+                        qr_results = data.get("qr_results", [])
                         segment_size = data.get("size", 0)
                         
                         if not segment_id or not base64_data:
@@ -453,7 +431,8 @@ async def consumer_handler(websocket):
                                 None,
                                 session.handle_mp4_segment,
                                 segment_id,
-                                mp4_data
+                                mp4_data,
+                                qr_results
                             )
                         except Exception as e:
                             print(f"[Error]: Failed to decode/handle MP4 segment from {client_id}: {e}")

@@ -222,7 +222,7 @@ REALTIME_PROCESSING_ENABLED=true  # 是否启用实时处理（默认true）
 REALTIME_TARGET_SEGMENT_DURATION=60.0  # 目标分段时长（秒，默认60）
 REALTIME_QUEUE_ALERT_THRESHOLD=10  # 队列告警阈值（默认10）
 REALTIME_CLEANUP_H264=true  # 是否清理H264临时文件（默认true）
-REALTIME_INDEXING_ENABLED=false  # 实时处理时是否启用索引（分块和嵌入，默认false）
+# 注意：索引已不再由视频处理触发，统一由独立脚本处理（如 scripts/index_events.py）
 
 # 数据库配置（可选，使用默认值）
 SEEKDB_HOST=127.0.0.1

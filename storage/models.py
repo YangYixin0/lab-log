@@ -12,6 +12,7 @@ class VideoSegment:
     video_path: str
     start_time: float  # seconds in video
     end_time: float
+    qr_results: List[Dict[str, Any]] = field(default_factory=list)  # OCR/QR 识别结果，默认空列表
 
 
 @dataclass

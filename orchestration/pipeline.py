@@ -31,7 +31,7 @@ class VideoLogPipeline:
             chunker: 日志分块器，如果为 None 则创建默认实例
             embedding_service: 嵌入服务，如果为 None 则创建默认实例
             db_client: 数据库客户端，如果为 None 则创建默认实例
-            enable_indexing: 是否启用索引（分块和嵌入），默认 False（已废弃，索引改为手动触发）
+            enable_indexing: 是否启用索引（分块和嵌入），默认 False（已废弃，索引完全由独立脚本处理，不再由视频处理触发）
         """
         self.db_client = db_client or SeekDBClient()
         
@@ -39,7 +39,7 @@ class VideoLogPipeline:
         self.log_writer = log_writer or LogWriter(self.db_client)
         self.chunker = chunker or LogChunker()
         self.embedding_service = embedding_service or EmbeddingService()
-        self.enable_indexing = enable_indexing  # 保留以兼容实时处理流程
+        self.enable_indexing = enable_indexing  # 保留参数以兼容旧代码，但实际不再使用
     
     def process_video(self, video_path: str) -> List[EventLog]:
         """

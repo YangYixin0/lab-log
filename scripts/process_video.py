@@ -15,7 +15,6 @@ from orchestration.pipeline import VideoLogPipeline
 def main():
     parser = argparse.ArgumentParser(description='处理视频并生成日志')
     parser.add_argument('video_path', type=str, help='视频文件路径')
-    parser.add_argument('--indexing', action='store_true', help='（已废弃）索引已改为手动触发，请使用 scripts/index_events.py')
     
     args = parser.parse_args()
     
@@ -24,8 +23,8 @@ def main():
         print(f"错误: 视频文件不存在: {video_path}")
         sys.exit(1)
     
-    # 创建处理流程（默认不启用索引，需要时使用 --indexing 参数）
-    with VideoLogPipeline(enable_indexing=args.indexing) as pipeline:
+    # 索引不再由视频处理触发，统一由独立脚本处理
+    with VideoLogPipeline(enable_indexing=False) as pipeline:
         try:
             events = pipeline.process_video(str(video_path))
             print(f"\n处理完成！共生成 {len(events)} 个事件日志")
