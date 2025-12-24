@@ -91,31 +91,36 @@ def clear_database_tables():
             connection.close()
 
 
-def clear_debug_log_file():
-    """清空或删除调试日志文件"""
+def clear_debug_files():
+    """清空或删除调试日志文件和缓存文件"""
     log_dir = project_root / "logs_debug"
-    log_file = log_dir / "event_logs.jsonl"
+    log_dir.mkdir(exist_ok=True)
     
-    try:
-        # 确保目录存在
-        log_dir.mkdir(exist_ok=True)
-        
-        if log_file.exists():
-            # 获取文件大小
-            file_size = log_file.stat().st_size
-            
-            # 清空文件（保留文件，但内容为空）
-            log_file.write_text('', encoding='utf-8')
-            print(f"  ✓ 清空调试日志文件: {log_file}")
-            print(f"    原文件大小: {file_size} 字节")
-            return True
-        else:
-            print(f"  - 调试日志文件不存在: {log_file}")
-            return True
-            
-    except Exception as e:
-        print(f"  ✗ 清空调试日志文件失败: {e}")
-        return False
+    files_to_clear = [
+        ("event_logs.jsonl", "调试日志文件"),
+        ("appearances_today.json", "人物外貌缓存文件"),
+    ]
+    
+    success_count = 0
+    for filename, description in files_to_clear:
+        file_path = log_dir / filename
+        try:
+            if file_path.exists():
+                # 获取文件大小
+                file_size = file_path.stat().st_size
+                
+                # 清空文件（保留文件，但内容为空）
+                file_path.write_text('', encoding='utf-8')
+                print(f"  ✓ 清空{description}: {file_path.name}")
+                print(f"    原文件大小: {file_size} 字节")
+                success_count += 1
+            else:
+                print(f"  - {description}不存在: {file_path.name}")
+                success_count += 1
+        except Exception as e:
+            print(f"  ✗ 清空{description}失败: {e}")
+    
+    return success_count == len(files_to_clear)
 
 
 def main():
@@ -129,6 +134,7 @@ def main():
     print("此操作将清空以下数据：")
     print("  1. 数据库表: logs_raw, logs_embedding, field_encryption_keys")
     print("  2. 调试日志文件: logs_debug/event_logs.jsonl")
+    print("  3. 人物外貌缓存: logs_debug/appearances_today.json")
     print()
     
     # 可选：添加交互式确认（如果需要，取消下面的注释）
@@ -145,9 +151,9 @@ def main():
     db_success = clear_database_tables()
     print()
     
-    # 清空日志文件
-    print("步骤 2/2: 清空调试日志文件...")
-    log_success = clear_debug_log_file()
+    # 清空日志文件和缓存文件
+    print("步骤 2/2: 清空调试日志文件和缓存文件...")
+    log_success = clear_debug_files()
     print()
     
     # 总结

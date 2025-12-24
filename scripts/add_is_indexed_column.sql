@@ -15,3 +15,4 @@ ADD INDEX idx_is_indexed (is_indexed);
 -- 注意：如果之前已经索引过，需要根据实际情况手动更新
 -- UPDATE logs_raw SET is_indexed = FALSE WHERE is_indexed IS NULL;
 
+

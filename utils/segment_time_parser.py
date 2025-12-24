@@ -40,3 +40,4 @@ def parse_segment_times(segment_id: str, target_duration: float) -> Tuple[float,
     current_time = time.time()
     return current_time, current_time + target_duration
 
+

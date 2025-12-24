@@ -66,7 +66,7 @@ class RecordingSession:
     def __init__(self, client_id: str, enable_realtime_processing: bool = False):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.client_id = client_id
-        self.session_dir = RECORDINGS_ROOT / f"{client_id}_{timestamp}"
+        self.session_dir = RECORDINGS_ROOT / timestamp
         self.session_dir.mkdir(parents=True, exist_ok=True)
         
         # 实时处理相关
@@ -113,8 +113,8 @@ class RecordingSession:
                 if loaded:
                     print(f"[Context]: 加载外貌缓存成功，共 {self.appearance_cache.get_record_count()} 条记录")
             
-            # 创建事件上下文
-            self.event_context = EventContext(self.db_client)
+            # 创建事件上下文（从 JSONL 文件读取）
+            self.event_context = EventContext()
             
             # 创建日志写入器（不加密）
             self.log_writer = SimpleLogWriter(self.db_client)

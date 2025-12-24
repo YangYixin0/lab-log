@@ -40,7 +40,7 @@ class EventLog:
     segment_id: str
     start_time: datetime
     end_time: datetime
-    event_type: Optional[str] = None  # 事件类型，如 "person"、"equipment-only"
+    event_type: Optional[str] = None  # 事件类型，如 "person"、"equipment-only"、"none"
     structured: Dict[str, Any] = field(default_factory=dict)
     raw_text: str = ""  # 事件的自然语言描述（不含外貌信息）
 

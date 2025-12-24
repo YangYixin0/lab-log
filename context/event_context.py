@@ -1,24 +1,29 @@
-"""当天事件缓存查询：从数据库获取最新事件用于模型上下文"""
+"""当天事件缓存查询：从 JSONL 文件获取最新事件用于模型上下文"""
 
 import json
+import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Dict, Any, Optional
-
-from storage.seekdb_client import SeekDBClient
 
 
 class EventContext:
-    """事件上下文管理器：查询当天最新事件"""
+    """事件上下文管理器：从 JSONL 文件查询当天最新事件"""
     
-    def __init__(self, db_client: Optional[SeekDBClient] = None):
+    def __init__(self, event_log_file: Optional[str] = None):
         """
         初始化事件上下文
         
         Args:
-            db_client: 数据库客户端，如果为 None 则创建默认实例
+            event_log_file: 事件日志文件路径，如果为 None 则使用默认路径 logs_debug/event_logs.jsonl
         """
-        self.db_client = db_client or SeekDBClient()
-        self._owns_db_client = db_client is None
+        if event_log_file is None:
+            # 默认使用项目根目录下的 logs_debug/event_logs.jsonl
+            # event_context.py 在 context/ 目录下，所以 parent.parent 是项目根目录
+            project_root = Path(__file__).parent.parent
+            self.event_log_file = project_root / "logs_debug" / "event_logs.jsonl"
+        else:
+            self.event_log_file = Path(event_log_file)
     
     def get_recent_events(self, n: int = 20, date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """
@@ -53,25 +58,50 @@ class EventContext:
     
     def _query_today_events(self, day_start: datetime, day_end: datetime, 
                             limit: int) -> List[Dict[str, Any]]:
-        """查询当天事件的原始数据"""
-        self.db_client._ensure_connected()
+        """从 JSONL 文件查询当天事件的原始数据"""
+        if not self.event_log_file.exists():
+            return []
         
-        sql = """
-            SELECT event_id, segment_id, start_time, end_time, 
-                   event_type, structured, raw_text
-            FROM logs_raw
-            WHERE start_time >= %s AND start_time < %s
-            ORDER BY start_time DESC
-            LIMIT %s
-        """
-        
+        events = []
         try:
-            with self.db_client.connection.cursor() as cursor:
-                cursor.execute(sql, (day_start, day_end, limit))
-                results = cursor.fetchall()
-                return list(results)
+            # 读取 JSONL 文件的所有行
+            with open(self.event_log_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        event = json.loads(line)
+                        # 解析时间
+                        start_time_str = event.get('start_time', '')
+                        if not start_time_str:
+                            continue
+                        
+                        # 解析 ISO 格式时间
+                        try:
+                            if 'T' in start_time_str:
+                                event_start = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                            else:
+                                continue
+                        except (ValueError, AttributeError):
+                            continue
+                        
+                        # 过滤当天的数据
+                        if day_start <= event_start < day_end:
+                            events.append(event)
+                    except json.JSONDecodeError:
+                        # 跳过无效的 JSON 行
+                        continue
+            
+            # 按时间降序排序（最新的在前）
+            events.sort(key=lambda x: x.get('start_time', ''), reverse=True)
+            
+            # 返回最新的 n 条
+            return events[:limit]
+            
         except Exception as e:
-            print(f"查询当天事件失败: {e}")
+            print(f"从 JSONL 文件查询当天事件失败: {e}")
             return []
     
     def _simplify_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
@@ -126,7 +156,7 @@ class EventContext:
     
     def get_max_event_id_number(self, date: Optional[datetime] = None) -> int:
         """
-        获取当天最大事件编号数字
+        获取当天最大事件编号数字（从 JSONL 文件读取）
         
         Args:
             date: 指定日期，默认为今天
@@ -140,31 +170,46 @@ class EventContext:
         day_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
         day_end = day_start + timedelta(days=1)
         
-        self.db_client._ensure_connected()
+        if not self.event_log_file.exists():
+            return 0
         
-        sql = """
-            SELECT event_id
-            FROM logs_raw
-            WHERE start_time >= %s AND start_time < %s
-            ORDER BY event_id DESC
-            LIMIT 1
-        """
-        
+        max_num = 0
         try:
-            with self.db_client.connection.cursor() as cursor:
-                cursor.execute(sql, (day_start, day_end))
-                result = cursor.fetchone()
-                if result and result.get('event_id'):
-                    # 从 event_id 中提取数字（格式如 evt_00042）
-                    event_id = result['event_id']
-                    # 提取最后的数字部分
-                    import re
-                    match = re.search(r'(\d+)$', event_id)
-                    if match:
-                        return int(match.group(1))
-                return 0
+            with open(self.event_log_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        event = json.loads(line)
+                        # 检查是否是当天的数据
+                        start_time_str = event.get('start_time', '')
+                        if not start_time_str:
+                            continue
+                        
+                        try:
+                            if 'T' in start_time_str:
+                                event_start = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                            else:
+                                continue
+                        except (ValueError, AttributeError):
+                            continue
+                        
+                        if day_start <= event_start < day_end:
+                            event_id = event.get('event_id', '')
+                            # 从 event_id 中提取数字（格式如 evt_00042）
+                            match = re.search(r'(\d+)$', event_id)
+                            if match:
+                                num = int(match.group(1))
+                                if num > max_num:
+                                    max_num = num
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            
+            return max_num
         except Exception as e:
-            print(f"获取最大事件编号失败: {e}")
+            print(f"从 JSONL 文件获取最大事件编号失败: {e}")
             return 0
     
     def format_for_prompt(self, events: List[Dict[str, Any]]) -> str:
@@ -198,13 +243,13 @@ class EventContext:
         return "\n".join(lines)
     
     def close(self):
-        """关闭资源"""
-        if self._owns_db_client and self.db_client:
-            self.db_client.close()
+        """关闭资源（JSONL 文件模式无需关闭）"""
+        pass
     
     def __enter__(self):
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
 

@@ -256,8 +256,19 @@ class AppearanceCache:
             return False
         
         try:
+            # 检查文件是否为空
+            file_size = file_path.stat().st_size
+            if file_size == 0:
+                print(f"[Context]: 外貌缓存为空")
+                return False
+            
             with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+                content = f.read().strip()
+                if not content:
+                    print(f"[Context]: 外貌缓存为空")
+                    return False
+                
+                data = json.loads(content)
             
             self.records.clear()
             for pid, r in data.get("records", {}).items():
@@ -270,8 +281,15 @@ class AppearanceCache:
             
             self.union_find.load_from_dict(data.get("union_find", {}))
             return True
+        except json.JSONDecodeError as e:
+            # JSON 解析错误，可能是文件为空或格式错误
+            if "Expecting value" in str(e) or "line 1 column 1" in str(e):
+                print(f"[Context]: 外貌缓存为空")
+            else:
+                print(f"[Context]: 加载外貌缓存失败（JSON 格式错误）: {e}")
+            return False
         except Exception as e:
-            print(f"加载外貌缓存失败: {e}")
+            print(f"[Context]: 加载外貌缓存失败: {e}")
             return False
     
     def get_record_count(self) -> int:
@@ -286,4 +304,5 @@ class AppearanceCache:
         """清空缓存"""
         self.records.clear()
         self.union_find = UnionFind()
+
 

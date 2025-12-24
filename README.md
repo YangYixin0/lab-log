@@ -44,8 +44,8 @@
 [视频分段] 关键帧对齐，分为多个约 60 秒的片段（迭代式分段确保连续性）
     ↓
 [动态上下文构建]
-    ├─ 查询当天最新 n 条事件（从数据库）
-    ├─ 加载人物外貌表缓存（从内存/文件）
+    ├─ 查询当天最新 n 条事件（从 JSONL 文件 logs_debug/event_logs.jsonl）
+    ├─ 加载人物外貌表缓存（从内存/文件 logs_debug/appearances_today.json）
     └─ 获取二维码识别结果（从分段元数据）
     ↓
 [视频理解] 调用 Qwen3-VL Flash，输入动态上下文，输出：
@@ -92,13 +92,14 @@
 1) **实时处理（Android 采集端 → WebSocket 服务器）**
    - Android 端用 MediaCodec 编码 H.264，并在关键帧前附带完整 SPS/PPS（关键经验：给 IDR 帧前置 SPS/PPS，保证每段 MP4 可独立解码），使用 MediaMuxer 生成小 MP4 分段，通过 WebSocket 发送到服务器。
    - **二维码识别**：采集过程中使用 ML Kit 实时识别用户二维码，按分段聚合识别结果（同一用户保留最高置信度），随 MP4 分段元数据一起上报。识别成功时播放提示音并在预览层显示提示。
-   - 服务器 `streaming_server` 接收 Base64 MP4 文本消息（包含二维码识别结果），保存到 `recordings/<client_id>_<timestamp>/` 目录：
+   - 服务器 `streaming_server` 接收 Base64 MP4 文本消息（包含二维码识别结果），保存到 `recordings/<timestamp>/` 目录：
      - MP4 分段保存为 `{segment_id}.mp4`
      - 二维码识别结果保存为 `{segment_id}_qr.json`
    - 如果启用实时处理，立即进行视频理解并写入数据库；否则仅保存文件，后续可使用 `scripts/process_recording_session.py` 处理。
    - **动态上下文模式**（默认启用）：
      - 每个会话维护独立的人物外貌缓存（AppearanceCache）
-     - 从数据库查询当天最新 n 条事件作为上下文
+     - 从 JSONL 文件（`logs_debug/event_logs.jsonl`）读取当天最新 n 条事件作为上下文
+     - 启动时自动加载已存在的外貌缓存文件（`logs_debug/appearances_today.json`）
      - 模型输出续写事件和外貌更新，事件立即入库（不加密），外貌更新写入缓存
      - 每处理 N 个分段，自动保存外貌缓存到 `logs_debug/appearances_today.json`
    - 处理管线：动态上下文构建 → Qwen3-VL Flash → 解析双输出 → 事件写入 logs_raw（不加密）→ 外貌更新缓存 → 生成缩略图 → 单行 Realtime 日志输出。
@@ -122,13 +123,13 @@
    - 采用迭代式分段：每提取一个分段后，检查实际结束时间，从那里开始下一个分段
    - 确保分段连续且无重叠，每个分段不超过 5 分钟
 2. **视频理解**（动态上下文模式）：
-   - 构建动态提示词：包含视频片段、二维码识别结果、当天最新 n 条事件、人物外貌表全量
-   - 调用 Qwen3-VL Flash API 分析视频内容
+   - 构建动态提示词：包含视频片段、二维码识别结果、当天最新 n 条事件（从 JSONL 文件读取）、人物外貌表全量（从缓存文件加载）
+   - 调用 Qwen3-VL API 分析视频内容（可通过环境变量选择 Flash 或 Plus 模型）
    - 模型输出两部分：
      - `events_to_append`：续写的事件列表（event_id, start_time, end_time, event_type, person_ids, equipment, description）
      - `appearance_updates`：外貌更新操作（add/update/merge）
    - 应用外貌更新到缓存（使用并查集管理合并关系）
-   - 生成结构化的事件列表（EventLog），事件不加密直接写入数据库
+   - 生成结构化的事件列表（EventLog），事件不加密直接写入数据库和 JSONL 文件
 3. **数据存储**（动态上下文模式）：
    - 事件立即写入 SeekDB 的 `logs_raw` 表（不加密，structured 字段包含 person_ids 列表）
    - 同时写入 `logs_debug/event_logs.jsonl` 用于调试
@@ -280,7 +281,12 @@ REALTIME_CLEANUP_H264=true  # 是否清理H264临时文件（默认true）
 # 动态上下文配置（可选）
 DYNAMIC_CONTEXT_ENABLED=true  # 是否启用动态上下文（默认true）
 MAX_RECENT_EVENTS=20  # 最大最近事件数（默认20）
-APPEARANCE_DUMP_INTERVAL=5  # 外貌缓存保存间隔（每处理N个分段保存一次，默认5）
+APPEARANCE_DUMP_INTERVAL=1  # 外貌缓存保存间隔（每处理N个分段保存一次，默认1）
+
+# 视频理解模型配置（可选）
+QWEN_MODEL=qwen3-vl-flash  # 模型名称：qwen3-vl-flash 或 qwen3-vl-plus（默认 qwen3-vl-flash）
+ENABLE_THINKING=true  # 是否启用思考（默认true）
+THINKING_BUDGET=8192  # 思考预算（tokens，默认8192）
 
 # 注意：索引已不再由视频处理触发，统一由独立脚本处理（如 scripts/index_events.py）
 
@@ -494,11 +500,11 @@ python scripts/process_recording_session.py recordings/<session_dir> --target-du
 **会话目录结构**：
 ```
 recordings/
-└── <client_id>_<timestamp>/
-    ├── 20251221_195713_00.mp4
-    ├── 20251221_195713_00_qr.json
-    ├── 20251221_195714_00.mp4
-    ├── 20251221_195714_00_qr.json
+└── 20251224_163520/
+    ├── 20251224_163520_00.mp4
+    ├── 20251224_163520_00_qr.json
+    ├── 20251224_163521_00.mp4
+    ├── 20251224_163521_00_qr.json
     └── ...
 ```
 
@@ -593,7 +599,7 @@ python scripts/extract_segment_aligned.py <视频文件> <起始时间> <结束�
 # 测试向量搜索功能
 python scripts/test_vector_search.py
 
-# 清空测试数据
+# 清空测试数据（包括数据库表、事件日志文件、人物外貌缓存）
 python scripts/clear_test_data.py
 ```
 
@@ -622,10 +628,15 @@ python scripts/clear_test_data.py
 - **回退机制**：如果关键帧太少，自动回退到时间分段
 
 ### 动态上下文视频理解
-- **动态提示词构建**：基于当天事件缓存（最新 n 条）、人物外貌表缓存（全量）和二维码识别结果构建提示词
+- **动态提示词构建**：基于当天事件缓存（从 JSONL 文件读取最新 n 条）、人物外貌表缓存（从文件加载全量）和二维码识别结果构建提示词
+- **模型选择**：支持通过环境变量选择使用 Qwen3-VL Flash 或 Plus 模型
 - **模型输出**：模型输出两部分结构化数据
   - `events_to_append`：续写的事件列表（event_id, start_time, end_time, event_type, person_ids, equipment, description）
   - `appearance_updates`：外貌更新操作（add/update/merge）
+- **事件类型**：支持三种事件类型
+  - `person`：人物事件，包含人物动作和设备操作
+  - `equipment-only`：设备事件，仅设备状态变化，无人物参与（person_ids 为空数组）
+  - `none`：空事件，画面中既无人物活动也无设备数值变化（person_ids 为空数组，equipment 为空字符串）
 - **编号分配规则**：模型分配人物编号（p1, p2...）和事件编号（evt_00001...），新增编号必须大于现存最大编号
 - **人物外貌匹配**：
   - 优先重用已有外貌记录（匹配稀有特征）
@@ -634,6 +645,7 @@ python scripts/clear_test_data.py
   - 合并方向：小编号合并到大编号（merge_from < target_person_id）
 - **外貌表管理**：使用并查集管理人物编号合并关系，支持路径压缩
 - **二维码用户关联**：根据二维码识别结果的时间戳，将用户ID关联到对应的人物外貌记录
+- **事件上下文来源**：从 `logs_debug/event_logs.jsonl` 文件读取，无需数据库连接，支持离线工作
 
 ### 视频理解（传统模式）
 - 使用 Qwen3-VL Flash 进行视频理解
@@ -699,11 +711,14 @@ lab-log/
 ├── config/              # 配置模块
 ├── context/             # 动态上下文模块
 │   ├── appearance_cache.py      # 人物外貌缓存管理器（并查集）
-│   ├── event_context.py         # 事件上下文查询
+│   ├── event_context.py         # 事件上下文查询（从 JSONL 文件读取）
 │   └── prompt_builder.py        # 动态提示词构建器
 ├── storage/             # 数据库存储
 ├── segmentation/        # 视频分段
 ├── video_processing/    # 视频理解
+│   ├── qwen3_vl_processor.py        # 处理器工厂（根据环境变量选择 Flash/Plus）
+│   ├── qwen3_vl_flash_processor.py  # Qwen3-VL Flash 处理器
+│   └── qwen3_vl_plus_processor.py   # Qwen3-VL Plus 处理器
 ├── log_writer/          # 日志写入与加密
 ├── indexing/            # 分块与嵌入
 │   ├── chunker.py              # 分块器（策略模式）
@@ -934,9 +949,12 @@ python streaming_server/test_qr_server.py
 10. **动态上下文功能**：
     - 默认启用动态上下文模式（`DYNAMIC_CONTEXT_ENABLED=true`）
     - 每个录制会话维护独立的人物外貌缓存
+    - 启动时自动加载已存在的外貌缓存文件（`logs_debug/appearances_today.json`），会继承上一次调试的结果
+    - 事件上下文从 JSONL 文件（`logs_debug/event_logs.jsonl`）读取，无需数据库连接
     - 外貌缓存自动保存到 `logs_debug/appearances_today.json`（每处理 N 个分段）
-    - 事件不加密直接写入数据库，人物外貌表日终再加密入库
+    - 事件不加密直接写入数据库和 JSONL 文件，人物外貌表日终再加密入库
     - 使用 `scripts/end_of_day.py` 执行日终处理（压缩、加密、更新事件 person_ids）
+    - 使用 `scripts/clear_test_data.py` 清空测试数据时，会同时清空事件日志文件和人物外貌缓存
 
 11. **画面条纹问题解决经验**：
     - **问题现象**：竖屏采集时视频画面出现绿色/紫色条纹
