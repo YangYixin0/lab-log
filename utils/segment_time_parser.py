@@ -2,7 +2,33 @@
 
 import time
 from datetime import datetime
-from typing import Tuple
+from typing import Tuple, Optional
+
+
+def extract_date_from_segment_id(segment_id: str) -> Optional[datetime]:
+    """
+    从 segment_id 中提取日期
+    
+    segment_id 格式：YYYYMMDD_HHMMSS_XX
+    例如：20251221_195713_00
+    
+    Args:
+        segment_id: 分段ID，格式为 YYYYMMDD_HHMMSS_XX
+    
+    Returns:
+        datetime 对象，如果解析失败则返回 None
+    """
+    try:
+        parts = segment_id.split('_')
+        if len(parts) >= 2:
+            date_str = parts[0]  # 20251221
+            # 解析日期部分
+            segment_date = datetime.strptime(date_str, "%Y%m%d")
+            return segment_date
+    except Exception:
+        pass
+    
+    return None
 
 
 def parse_segment_times(segment_id: str, target_duration: float) -> Tuple[float, float]:

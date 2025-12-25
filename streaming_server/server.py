@@ -17,7 +17,7 @@ import websockets
 from streaming_server.monitoring import MonitoringLogger
 from storage.models import VideoSegment
 from storage.seekdb_client import SeekDBClient
-from utils.segment_time_parser import parse_segment_times
+from utils.segment_time_parser import parse_segment_times, extract_date_from_segment_id
 
 # 动态上下文相关模块
 from context.appearance_cache import AppearanceCache
@@ -296,12 +296,20 @@ async def process_segment_queue_dynamic(session: RecordingSession):
                 
                 loop = asyncio.get_event_loop()
                 
-                # 获取最近事件和最大事件编号
+                # 从 segment_id 提取视频日期
+                segment_date = extract_date_from_segment_id(segment.segment_id)
+                
+                # 获取最近事件和最大事件编号（使用视频日期而非今天）
                 recent_events = []
                 max_event_id = 0
                 if session.event_context:
-                    recent_events = session.event_context.get_recent_events(MAX_RECENT_EVENTS)
-                    max_event_id = session.event_context.get_max_event_id_number()
+                    if segment_date:
+                        recent_events = session.event_context.get_recent_events(MAX_RECENT_EVENTS, date=segment_date)
+                        max_event_id = session.event_context.get_max_event_id_number(date=segment_date)
+                    else:
+                        # 如果无法解析日期，回退到使用今天
+                        recent_events = session.event_context.get_recent_events(MAX_RECENT_EVENTS)
+                        max_event_id = session.event_context.get_max_event_id_number()
                 
                 # 视频理解（使用动态上下文）
                 video_process_start = time.time()

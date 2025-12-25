@@ -19,7 +19,7 @@ from video_processing.qwen3_vl_plus_processor import Qwen3VLPlusProcessor
 def create_qwen_processor(
     api_key: str = None,
     model: str = None,
-    fps: float = 1.0,
+    fps: Optional[float] = None,
     enable_thinking: bool = None,
     thinking_budget: int = None,
     appearance_cache: Optional[AppearanceCache] = None,
@@ -32,7 +32,7 @@ def create_qwen_processor(
     Args:
         api_key: DashScope API Key，如果为 None 则从环境变量读取
         model: 模型名称，如果为 None 则从环境变量 QWEN_MODEL 读取
-        fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧
+        fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧，如果为 None 则从环境变量 VIDEO_FPS 读取，默认 1.0，如果为默认值 1.0 则从环境变量 VIDEO_FPS 读取
         enable_thinking: 是否启用思考，如果为 None 则从环境变量 ENABLE_THINKING 读取
         thinking_budget: 思考预算，如果为 None 则从环境变量 THINKING_BUDGET 读取
         appearance_cache: 人物外貌缓存，如果为 None 则创建默认实例
@@ -45,6 +45,14 @@ def create_qwen_processor(
     # 确定使用的模型
     if model is None:
         model = os.getenv('QWEN_MODEL', 'qwen3-vl-flash')
+    
+    # 从环境变量读取 fps 配置，如果没有则使用参数或默认值
+    if fps is None:
+        fps_str = os.getenv('VIDEO_FPS', '1.0')
+        try:
+            fps = float(fps_str)
+        except ValueError:
+            fps = 1.0
     
     # 根据模型名称选择处理器
     if 'plus' in model.lower() or model == 'qwen3-vl-plus':
@@ -86,7 +94,7 @@ class Qwen3VLProcessor:
         cls,
         api_key: str = None,
         model: str = None,
-        fps: float = 1.0,
+        fps: Optional[float] = None,
         enable_thinking: bool = None,
         thinking_budget: int = None,
         appearance_cache: Optional[AppearanceCache] = None,

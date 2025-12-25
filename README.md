@@ -278,6 +278,7 @@ REALTIME_TARGET_SEGMENT_DURATION=60.0  # 目标分段时长（秒，默认60）
 REALTIME_QUEUE_ALERT_THRESHOLD=10  # 队列告警阈值（默认10）
 REALTIME_CLEANUP_H264=true  # 是否清理H264临时文件（默认true）
 WEBSOCKET_MAX_SIZE_MB=50.0  # WebSocket消息最大大小（MB，默认50.0，用于接收MP4分段）
+WEBSOCKET_VERBOSE=false  # 是否启用WebSocket调试日志（默认false）
 
 # 动态上下文配置（可选）
 DYNAMIC_CONTEXT_ENABLED=true  # 是否启用动态上下文（默认true）
@@ -293,8 +294,12 @@ DEFAULT_FPS=4                       # 默认帧率（默认4）
 
 # 视频理解模型配置（可选）
 QWEN_MODEL=qwen3-vl-flash  # 模型名称：qwen3-vl-flash 或 qwen3-vl-plus（默认 qwen3-vl-flash）
+VIDEO_FPS=2.0  # 视频抽帧率，表示每隔 1/fps 秒抽取一帧（默认 2.0）
 ENABLE_THINKING=true  # 是否启用思考（默认true）
 THINKING_BUDGET=8192  # 思考预算（tokens，默认8192）
+VL_HIGH_RESOLUTION_IMAGES=true  # 是否启用高分辨率图像处理（默认 true）
+VL_TEMPERATURE=0.1  # 模型温度参数，控制输出随机性（默认 0.1）
+VL_TOP_P=0.7  # Top-p 采样参数，控制输出多样性（默认 0.7）
 
 # 注意：索引已不再由视频处理触发，统一由独立脚本处理（如 scripts/index_events.py）
 
@@ -522,6 +527,24 @@ recordings/
     └── ...
 ```
 
+**连接视频片段（可选）**：
+
+如果需要将会话中的所有视频片段连接成一个完整的视频文件，可以使用 `scripts/concat_videos.py`：
+
+```bash
+# 连接会话中的所有视频片段（输出到 <session_dir>/concatenated.mp4）
+python scripts/concat_videos.py recordings/<session_dir>
+
+# 指定输出文件路径
+python scripts/concat_videos.py recordings/<session_dir> -o output.mp4
+```
+
+**功能说明**：
+- 自动扫描目录中的所有 `.mp4` 文件并按文件名排序（时间戳顺序）
+- 检测每个视频的帧率，找到最高帧率并向上取整作为统一帧率
+- 使用 ffmpeg 重新编码并连接所有视频片段
+- 输出为 H.264 编码的 MP4 文件，帧率统一，分辨率保持一致
+
 #### 7.3 手动触发索引
 
 对未索引的事件进行分块和嵌入：
@@ -609,6 +632,9 @@ python scripts/analyze_keyframes.py <视频文件1> [视频文件2] ...
 
 # 从视频中提取片段（自动对齐到关键帧）
 python scripts/extract_segment_aligned.py <视频文件> <起始时间> <结束时间> <输出文件>
+
+# 连接录制会话中的视频片段（重新编码并统一帧率）
+python scripts/concat_videos.py recordings/<session_dir> [-o output.mp4]
 
 # 测试向量搜索功能
 python scripts/test_vector_search.py
@@ -746,6 +772,7 @@ lab-log/
 ├── scripts/             # 工具脚本
 │   ├── process_video.py              # 视频处理入口（处理未分段视频）
 │   ├── process_recording_session.py  # 处理已保存的采集会话（包含二维码结果）
+│   ├── concat_videos.py              # 连接录制会话中的视频片段（重新编码并统一帧率）
 │   ├── index_events.py              # 手动触发索引（分块和嵌入）
 │   ├── end_of_day.py                # 日终处理脚本（外貌缓存压缩、加密入库、更新事件 person_ids）
 │   ├── init_database.py             # 数据库初始化

@@ -16,6 +16,7 @@ from storage.models import VideoSegment, VideoUnderstandingResult, EventLog
 from context.appearance_cache import AppearanceCache
 from context.event_context import EventContext
 from context.prompt_builder import PromptBuilder
+from utils.segment_time_parser import extract_date_from_segment_id
 
 # 加载环境变量
 load_dotenv()
@@ -46,7 +47,7 @@ class Qwen3VLPlusProcessor(VideoProcessor):
         self,
         api_key: str = None,
         model: str = None,
-        fps: float = 1.0,
+        fps: Optional[float] = None,
         enable_thinking: bool = None,
         thinking_budget: int = None,
         appearance_cache: Optional[AppearanceCache] = None,
@@ -59,7 +60,7 @@ class Qwen3VLPlusProcessor(VideoProcessor):
         Args:
             api_key: DashScope API Key，如果为 None 则从环境变量读取
             model: 模型名称，如果为 None 则从环境变量 QWEN_MODEL 读取，默认 "qwen3-vl-plus"
-            fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧
+            fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧，如果为 None 则从环境变量 VIDEO_FPS 读取，默认 1.0
             enable_thinking: 是否启用思考，如果为 None 则从环境变量 ENABLE_THINKING 读取，默认 True
             thinking_budget: 思考预算，如果为 None 则从环境变量 THINKING_BUDGET 读取，默认 8192 tokens
             appearance_cache: 人物外貌缓存，如果为 None 则创建默认实例
@@ -89,7 +90,31 @@ class Qwen3VLPlusProcessor(VideoProcessor):
         else:
             self.thinking_budget = thinking_budget
         
-        self.fps = fps
+        # 从环境变量读取 fps 配置，如果没有则使用参数或默认值
+        if fps is None:
+            fps_str = os.getenv('VIDEO_FPS', '1.0')
+            try:
+                self.fps = float(fps_str)
+            except ValueError:
+                self.fps = 1.0
+        else:
+            self.fps = fps
+        
+        # 从环境变量读取模型调用参数
+        vl_high_res_str = os.getenv('VL_HIGH_RESOLUTION_IMAGES', 'true')
+        self.vl_high_resolution_images = vl_high_res_str.lower() in ('true', '1', 'yes', 'on')
+        
+        temp_str = os.getenv('VL_TEMPERATURE', '0.1')
+        try:
+            self.temperature = float(temp_str)
+        except ValueError:
+            self.temperature = 0.1
+        
+        top_p_str = os.getenv('VL_TOP_P', '0.7')
+        try:
+            self.top_p = float(top_p_str)
+        except ValueError:
+            self.top_p = 0.7
         
         # 动态上下文相关
         self.appearance_cache = appearance_cache or AppearanceCache()
@@ -149,6 +174,9 @@ class Qwen3VLPlusProcessor(VideoProcessor):
                 model=self.model,
                 messages=messages,
                 stream=False,
+                vl_high_resolution_images=self.vl_high_resolution_images,
+                temperature=self.temperature,
+                top_p=self.top_p,
                 enable_thinking=self.enable_thinking,
                 thinking_budget=self.thinking_budget
             )
@@ -240,6 +268,9 @@ class Qwen3VLPlusProcessor(VideoProcessor):
                 model=self.model,
                 messages=messages,
                 stream=False,
+                vl_high_resolution_images=self.vl_high_resolution_images,
+                temperature=self.temperature,
+                top_p=self.top_p,
                 enable_thinking=self.enable_thinking,
                 thinking_budget=self.thinking_budget
             )
@@ -252,12 +283,20 @@ class Qwen3VLPlusProcessor(VideoProcessor):
     
     def _build_dynamic_prompt(self, segment: VideoSegment) -> str:
         """使用动态上下文构建提示词"""
-        # 获取最近事件
+        # 从 segment_id 提取视频日期
+        segment_date = extract_date_from_segment_id(segment.segment_id)
+        
+        # 获取最近事件（使用视频日期而非今天）
         recent_events = []
         max_event_id = 0
         if self.event_context:
-            recent_events = self.event_context.get_recent_events(self.max_recent_events)
-            max_event_id = self.event_context.get_max_event_id_number()
+            if segment_date:
+                recent_events = self.event_context.get_recent_events(self.max_recent_events, date=segment_date)
+                max_event_id = self.event_context.get_max_event_id_number(date=segment_date)
+            else:
+                # 如果无法解析日期，回退到使用今天
+                recent_events = self.event_context.get_recent_events(self.max_recent_events)
+                max_event_id = self.event_context.get_max_event_id_number()
         
         # 获取最大人物编号
         max_person_id = self.appearance_cache.get_max_person_id_number()
