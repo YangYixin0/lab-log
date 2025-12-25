@@ -16,10 +16,12 @@ import com.example.lablogcamera.utils.OcrBFontRenderer
 import com.example.lablogcamera.utils.VideoEncoder
 import com.example.lablogcamera.utils.applyResolutionLimit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
@@ -245,7 +247,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                 
                 // 更新 ImageAnalysis（这会触发 CameraPreview 重新绑定相机）
                 withContext(Dispatchers.Main) {
-                    _imageAnalysis.value = analysis
+                    imageAnalysis.value = analysis
                 }
                 
                 // 等待相机绑定和第一帧到达

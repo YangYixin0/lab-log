@@ -1,7 +1,6 @@
 package com.example.lablogcamera.ui
 
 import android.net.Uri
-import android.net.Uri
 import android.widget.VideoView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
