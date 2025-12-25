@@ -2669,7 +2669,7 @@ data class WebSocketUiState(
 )
 
 @OptIn(ExperimentalPermissionsApi::class)
-class MainActivity : ComponentActivity() {
+class OriginalMainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

@@ -24,7 +24,7 @@ qwen_model=qwen3-vl-flash
 
 # 视频参数
 video_resolution_limit=1920
-video_bitrate_mbps=2.0
+video_bitrate_mbps=1.0
 video_fps=4
 video_max_duration_seconds=60
 

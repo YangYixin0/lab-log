@@ -79,4 +79,6 @@ dependencies {
     implementation("com.google.code.gson:gson:2.10.1")
     // 导航
     implementation("androidx.navigation:navigation-compose:2.7.6")
+    // Material Icons Extended
+    implementation("androidx.compose.material:material-icons-extended:1.5.4")
 }
