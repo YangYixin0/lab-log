@@ -54,6 +54,22 @@ DYNAMIC_CONTEXT_ENABLED = get_config('DYNAMIC_CONTEXT_ENABLED', True, bool)
 MAX_RECENT_EVENTS = get_config('MAX_RECENT_EVENTS', 20, int)
 APPEARANCE_DUMP_INTERVAL = get_config('APPEARANCE_DUMP_INTERVAL', 5, int)  # 每 N 个分段 dump 一次
 
+# start 命令的默认参数（可通过环境变量覆盖）
+DEFAULT_ASPECT_RATIO_WIDTH = get_config('DEFAULT_ASPECT_RATIO_WIDTH', 4, int)
+DEFAULT_ASPECT_RATIO_HEIGHT = get_config('DEFAULT_ASPECT_RATIO_HEIGHT', 3, int)
+DEFAULT_BITRATE_MB = get_config('DEFAULT_BITRATE_MB', 1.0, float)
+DEFAULT_FPS = get_config('DEFAULT_FPS', 10, int)
+# 是否在 start 命令中默认包含 aspectRatio（如果为 False，则使用客户端 UI 选择的宽高比）
+DEFAULT_INCLUDE_ASPECT_RATIO = get_config('DEFAULT_INCLUDE_ASPECT_RATIO', False, bool)
+# WebSocket 单消息大小上限（MB），用于容纳更长分段
+WEBSOCKET_MAX_SIZE_MB = get_config('WEBSOCKET_MAX_SIZE_MB', 10.0, float)
+WEBSOCKET_VERBOSE = get_config('WEBSOCKET_VERBOSE', False, bool)
+
+
+def log_debug(msg: str):
+    if WEBSOCKET_VERBOSE:
+        print(msg)
+
 
 class RecordingSession:
     """
@@ -450,8 +466,10 @@ async def start_recording(websocket, client_id: str):
 
 
 async def finalize_recording(websocket, client_id: str):
+    log_debug(f"[Debug]: finalize_recording called for {client_id}")
     session = RECORDING_SESSIONS.pop(websocket, None)
     if not session:
+        log_debug(f"[Debug]: No active session found for {client_id}")
         return
     
     # 如果启用实时处理，等待处理队列完成
@@ -508,17 +526,27 @@ async def consumer_handler(websocket):
     
     try:
         message_count = 0
+        received_capture_stopped = False
         async for message in websocket:
             message_count += 1
             receive_time = time.time()
+            message_size = len(message) if isinstance(message, (str, bytes)) else 0
+            message_size_mb = message_size / (1024 * 1024)
+            
             if isinstance(message, str):
                 # 文本：来自 App 的 JSON 消息（状态或MP4分段）
+                log_debug(f"[Debug]: Received text message #{message_count} from {client_id}, size={message_size_mb:.2f} MB")
+                if message_size_mb > 0.1:  # 大于100KB的消息，记录前100个字符用于调试
+                    preview = message[:100] if len(message) > 100 else message
+                    log_debug(f"[Debug]: Message preview (first 100 chars): {preview}...")
                 try:
                     data = json.loads(message)
                     msg_type = data.get("type")
+                    log_debug(f"[Debug]: Message type={msg_type}, keys={list(data.keys())}")
                     
                     if msg_type == "mp4_segment":
                         # MP4分段消息
+                        log_debug(f"[Debug]: Processing MP4 segment message from {client_id}")
                         session = RECORDING_SESSIONS.get(websocket)
                         if not session:
                             print(f"[Warning]: Received MP4 segment from {client_id} without active session.")
@@ -530,28 +558,46 @@ async def consumer_handler(websocket):
                         segment_size = data.get("size", 0)
                         
                         if not segment_id or not base64_data:
-                            print(f"[Error]: Invalid MP4 segment message from {client_id}")
+                            print(f"[Error]: Invalid MP4 segment message from {client_id}: segment_id={segment_id}, has_base64={bool(base64_data)}")
                             continue
                         
                         # Base64解码MP4数据（在后台线程执行，避免阻塞消息接收）
                         try:
                             decode_start = time.time()
                             loop = asyncio.get_event_loop()
-                            mp4_data = await loop.run_in_executor(
-                                None, 
-                                base64.b64decode, 
-                                base64_data
+                            
+                            # 使用超时保护，避免长时间阻塞
+                            mp4_data = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None, 
+                                    base64.b64decode, 
+                                    base64_data
+                                ),
+                                timeout=60.0  # 60秒超时
                             )
                             decode_time = time.time() - decode_start
-                            await loop.run_in_executor(
-                                None,
-                                session.handle_mp4_segment,
-                                segment_id,
-                                mp4_data,
-                                qr_results
+                            decoded_size_mb = len(mp4_data) / (1024 * 1024)
+                            log_debug(f"[Debug]: Base64 decode completed in {decode_time:.2f}s, decoded_size={decoded_size_mb:.2f} MB")
+                            
+                            # 保存分段（也在后台线程执行）
+                            await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None,
+                                    session.handle_mp4_segment,
+                                    segment_id,
+                                    mp4_data,
+                                    qr_results
+                                ),
+                                timeout=10.0  # 10秒超时
                             )
+                            log_debug(f"[Debug]: MP4 segment {segment_id} saved successfully")
+                        except asyncio.TimeoutError:
+                            print(f"[Error]: Timeout while processing MP4 segment {segment_id} from {client_id}")
+                            import traceback
+                            traceback.print_exc()
+                            continue
                         except Exception as e:
-                            print(f"[Error]: Failed to decode/handle MP4 segment from {client_id}: {e}")
+                            print(f"[Error]: Failed to decode/handle MP4 segment {segment_id} from {client_id}: {type(e).__name__}: {e}")
                             import traceback
                             traceback.print_exc()
                             continue
@@ -564,12 +610,29 @@ async def consumer_handler(websocket):
                     else:
                         # 状态消息
                         status = data.get("status")
+                        message_text = data.get("message", "")
+                        log_debug(f"[Debug]: Received status message: status={status}, message={message_text}")
                         if status == "capture_started":
+                            log_debug(f"[Debug]: Starting recording for {client_id}")
                             await start_recording(websocket, client_id)
                         elif status == "capture_stopped":
+                            log_debug(f"[Debug]: Received capture_stopped from {client_id}, finalizing recording...")
+                            received_capture_stopped = True
                             await finalize_recording(websocket, client_id)
+                            log_debug(f"[Debug]: Recording finalized for {client_id}")
+                        else:
+                            log_debug(f"[Debug]: Unknown status: {status}")
                 except (json.JSONDecodeError, TypeError) as e:
-                    print(f"[Warning]: Failed to parse JSON message from {client_id}: {e}")
+                    print(f"[Error]: Failed to parse JSON message from {client_id}: {type(e).__name__}: {e}")
+                    if isinstance(e, json.JSONDecodeError):
+                        print(f"[Error]: JSON decode error at position {e.pos}, line {e.lineno}, column {e.colno}")
+                        # 显示错误位置附近的内容
+                        if e.pos and len(message) > e.pos:
+                            start = max(0, e.pos - 50)
+                            end = min(len(message), e.pos + 50)
+                            print(f"[Error]: Context around error: ...{message[start:end]}...")
+                    import traceback
+                    traceback.print_exc()
                     pass
             else:
                 # 二进制消息：不再处理H264帧，忽略
@@ -577,6 +640,8 @@ async def consumer_handler(websocket):
 
     except websockets.exceptions.ConnectionClosed as e:
         print(f"[Connection]: Client {client_id} disconnected: code={e.code}, reason={e.reason}")
+        log_debug(f"[Debug]: Total messages received before disconnect: {message_count}")
+        log_debug(f"[Debug]: Received capture_stopped before disconnect: {received_capture_stopped}")
         if e.code == 1006:
             print(f"[Warning]: 连接异常关闭 (1006)，可能是网络中断或超时")
             session = RECORDING_SESSIONS.get(websocket)
@@ -588,11 +653,19 @@ async def consumer_handler(websocket):
             print(f"[Info]: 连接正常关闭 (1000)")
         else:
             print(f"[Info]: 连接关闭，代码={e.code}")
+    except (websockets.exceptions.PayloadTooBig, OSError, ValueError) as e:
+        print(f"[Error]: 接收消息时发生错误: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
     except Exception as e:
         print(f"[Error]: 处理客户端 {client_id} 时发生异常: {type(e).__name__}: {e}")
+        log_debug(f"[Debug]: Total messages received before error: {message_count}")
         import traceback
         traceback.print_exc()
     finally:
+        # 如果还没有收到capture_stopped消息，说明连接异常断开，需要清理会话
+        if not received_capture_stopped:
+            log_debug(f"[Debug]: Connection closed without capture_stopped message, finalizing recording in finally block")
         await finalize_recording(websocket, client_id)
         print(f"[Info]: Recording session for {client_id} closed.")
 
@@ -651,8 +724,10 @@ async def terminal_input_handler():
             command_str = await loop.run_in_executor(
                 None,
                 lambda: input(
-                    "\nEnter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'): \n"
-                    "  Example: 'start 4:3 4 10' for 4:3 aspect ratio, 4 MB bitrate, 10 fps\n> "
+                    f"\nEnter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'): \n"
+                    f"  Example: 'start 4:3 4 10' for 4:3 aspect ratio, 4 MB bitrate, 10 fps\n"
+                    f"  Defaults (from env): aspect={DEFAULT_ASPECT_RATIO_WIDTH}:{DEFAULT_ASPECT_RATIO_HEIGHT}, "
+                    f"bitrate={DEFAULT_BITRATE_MB}MB, fps={DEFAULT_FPS}, include_aspect={DEFAULT_INCLUDE_ASPECT_RATIO}\n> "
                 ),
             )
             parts = command_str.lower().split()
@@ -661,37 +736,43 @@ async def terminal_input_handler():
             command = parts[0]
 
             if command == "start":
-                aspect_width, aspect_height = 4, 3
-                bitrate_mb = 1.0
-                fps = 10
-                include_aspect_ratio = len(parts) > 1
+                # 使用环境变量中的默认值
+                aspect_width, aspect_height = DEFAULT_ASPECT_RATIO_WIDTH, DEFAULT_ASPECT_RATIO_HEIGHT
+                bitrate_mb = DEFAULT_BITRATE_MB
+                fps = DEFAULT_FPS
+                # 如果命令行提供了宽高比参数，则包含 aspectRatio；否则根据环境变量决定
+                include_aspect_ratio = DEFAULT_INCLUDE_ASPECT_RATIO
 
-                if include_aspect_ratio:
+                if len(parts) > 1:
+                    # 命令行提供了宽高比参数
                     try:
                         aspect_width, aspect_height = map(int, parts[1].split(":"))
                         if aspect_width <= 0 or aspect_height <= 0:
                             raise ValueError("Aspect ratio must be positive")
+                        include_aspect_ratio = True
                     except (ValueError, IndexError):
-                        print("[Error]: Invalid aspect ratio format. Using default 4:3.")
-                        aspect_width, aspect_height = 4, 3
+                        print(f"[Error]: Invalid aspect ratio format. Using default {DEFAULT_ASPECT_RATIO_WIDTH}:{DEFAULT_ASPECT_RATIO_HEIGHT}.")
+                        aspect_width, aspect_height = DEFAULT_ASPECT_RATIO_WIDTH, DEFAULT_ASPECT_RATIO_HEIGHT
 
                 if len(parts) > 2:
+                    # 命令行提供了码率参数
                     try:
                         bitrate_mb = float(parts[2])
                         if bitrate_mb <= 0:
                             raise ValueError("Bitrate must be positive")
                     except ValueError:
-                        print("[Error]: Invalid bitrate. Using default 1 MB.")
-                        bitrate_mb = 1.0
+                        print(f"[Error]: Invalid bitrate. Using default {DEFAULT_BITRATE_MB} MB.")
+                        bitrate_mb = DEFAULT_BITRATE_MB
 
                 if len(parts) > 3:
+                    # 命令行提供了帧率参数
                     try:
                         fps = int(parts[3])
                         if fps < 0:
-                            fps = 10
+                            fps = DEFAULT_FPS
                     except ValueError:
-                        print("[Error]: Invalid fps. Using 10 FPS.")
-                        fps = 10
+                        print(f"[Error]: Invalid fps. Using default {DEFAULT_FPS} FPS.")
+                        fps = DEFAULT_FPS
 
                 payload = {
                     "format": "h264",
@@ -733,7 +814,7 @@ async def main(host: str = "0.0.0.0", port: int = 50002):
         ping_interval=20,
         ping_timeout=10,
         close_timeout=10,
-        max_size=10 * 1024 * 1024
+        max_size=int(WEBSOCKET_MAX_SIZE_MB * 1024 * 1024)
     )
     async with server_task:
         print(f"WebSocket server started at ws://{host}:{port}")
@@ -742,6 +823,7 @@ async def main(host: str = "0.0.0.0", port: int = 50002):
             print(f"[Info]: Realtime processing enabled (target segment duration: {REALTIME_TARGET_SEGMENT_DURATION}s)")
         if DYNAMIC_CONTEXT_ENABLED:
             print(f"[Info]: Dynamic context enabled (max recent events: {MAX_RECENT_EVENTS})")
+        print(f"[Info]: WebSocket max message size = {WEBSOCKET_MAX_SIZE_MB} MB")
         terminal_task = asyncio.create_task(terminal_input_handler())
         await asyncio.gather(terminal_task)
 

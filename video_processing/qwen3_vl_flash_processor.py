@@ -149,6 +149,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
                 model=self.model,
                 messages=messages,
                 stream=False,
+                # vl_high_resolution_images=True,
                 enable_thinking=self.enable_thinking,
                 thinking_budget=self.thinking_budget
             )

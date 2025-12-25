@@ -445,33 +445,17 @@ App 在关键状态变更时发送 `ClientStatus`：
 adb install app\build\outputs\apk\debug\app-debug.apk
 ```
 
-### 视频旋转（Rotation）处理
+### 视频旋转（Rotation）处理（已验证四姿态正常）
 
-#### 如何正确获取 rotation 值
+#### 现行策略
 
-1. **不要使用 `imageProxy.imageInfo.rotationDegrees` 直接作为 rotation**：
-   - `imageProxy.imageInfo.rotationDegrees` 表示相机传感器相对于屏幕的旋转
-   - 当屏幕方向被锁定时，该值可能不会随设备物理旋转而变化
-   - 直接使用会导致所有方向都返回相同的 rotation 值（通常是 90）
+- **预览/取景**：`targetRotation` 使用当前显示方向（Display rotation），保证预览与屏幕一致，避免与物理方向叠加导致误转。  
+- **编码/采集**：使用设备物理方向 + 摄像头映射计算 `rotationForBackend`，完全基于 `calculateRotationForBackend(physicalRotation, facing)`，不依赖 `imageProxy.imageInfo.rotationDegrees`，避免 HAL/显示旋转重复叠加。  
+- **公式（未变）**：  
+  - 后置：`(physicalRotation + 90) % 360`  
+  - 前置：竖/倒：`(physicalRotation + 90 + 180) % 360`；左/右横：`(physicalRotation + 90) % 360`
 
-2. **正确方法：使用设备物理方向计算 rotation**：
-   - 使用 `OrientationEventListener` 检测设备的物理方向（相对于重力）
-   - 根据摄像头类型使用不同的公式：
-     - **后置摄像头**：`rotationForBackend = (physicalRotation + 90) % 360`
-     - **前置摄像头**：
-       - 竖放（0°）或倒放（180°）：`rotationForBackend = (physicalRotation + 90 + 180) % 360`
-       - 左横（270°）或右横（90°）：`rotationForBackend = (physicalRotation + 90) % 360`
-   - 其中 `physicalRotation` 为：
-     - `0`：设备竖放（正常）
-     - `90`：设备右横（顺时针旋转 90 度）
-     - `180`：设备倒置
-     - `270`：设备左横（逆时针旋转 90 度）
-
-3. **rotation 值的含义**：
-   - `0`：不需要旋转（视频已经是正确的方向）
-   - `90`：需要顺时针旋转 90 度
-   - `180`：需要旋转 180 度
-   - `270`：需要逆时针旋转 90 度（或顺时针 270 度）
+实测：竖直、左横、右横、倒置四种姿态下，预览与采集视频方向均与现实一致。
 
 #### 设备方向与 rotation 的对应关系
 
@@ -497,10 +481,9 @@ adb install app\build\outputs\apk\debug\app-debug.apk
 
 视频旋转在 Android 端完成，通过手动旋转 YUV 数据实现：
 
-- 根据设备物理方向和摄像头类型计算需要旋转的角度
-- 在 `toNv12ByteArray()` 函数中实现 YUV 数据的旋转（支持 0、90、180、270 度）
-- 旋转后的数据满足 stride 和对齐要求（32/偶数对齐），避免条纹伪影
-- 发送到后端的视频已经是正确方向，后端无需再旋转
+- 编码前统一使用 `rotationForBackend`（见上公式）作为旋转角度；预览使用 Display rotation，不会干扰编码旋转。  
+- 在 `toNv12ByteArray()` 中按 0/90/180/270 度旋转 YUV，旋转后再按目标宽高比裁剪并 32/偶数对齐。  
+- 发送到后端的视频已经是正确方向，后端无需再旋转。
 
 **优势**：
 

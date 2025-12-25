@@ -277,11 +277,19 @@ REALTIME_PROCESSING_ENABLED=true  # 是否启用实时处理（默认true）
 REALTIME_TARGET_SEGMENT_DURATION=60.0  # 目标分段时长（秒，默认60）
 REALTIME_QUEUE_ALERT_THRESHOLD=10  # 队列告警阈值（默认10）
 REALTIME_CLEANUP_H264=true  # 是否清理H264临时文件（默认true）
+WEBSOCKET_MAX_SIZE_MB=50.0  # WebSocket消息最大大小（MB，默认50.0，用于接收MP4分段）
 
 # 动态上下文配置（可选）
 DYNAMIC_CONTEXT_ENABLED=true  # 是否启用动态上下文（默认true）
 MAX_RECENT_EVENTS=20  # 最大最近事件数（默认20）
 APPEARANCE_DUMP_INTERVAL=1  # 外貌缓存保存间隔（每处理N个分段保存一次，默认1）
+
+# start 命令默认参数（可选，用于流媒体服务器终端命令）
+DEFAULT_INCLUDE_ASPECT_RATIO=false   # 是否在 start 命令中默认包含 aspectRatio（默认false，即使用客户端UI选择的宽高比）
+DEFAULT_ASPECT_RATIO_WIDTH=4        # 默认宽高比宽度（默认4）
+DEFAULT_ASPECT_RATIO_HEIGHT=3       # 默认宽高比高度（默认3）
+DEFAULT_BITRATE_MB=1.0               # 默认码率（MB，默认1.0）
+DEFAULT_FPS=4                       # 默认帧率（默认4）
 
 # 视频理解模型配置（可选）
 QWEN_MODEL=qwen3-vl-flash  # 模型名称：qwen3-vl-flash 或 qwen3-vl-plus（默认 qwen3-vl-flash）
@@ -435,6 +443,7 @@ You can now connect your Android Camera App.
 
 Enter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'): 
   Example: 'start 4:3 4 10' for 4:3 aspect ratio, 4 MB bitrate, 10 fps
+  Defaults (from env): aspect=4:3, bitrate=1.0MB, fps=10, include_aspect=False
 > 
 ```
 
@@ -442,6 +451,11 @@ Enter command ('start [w]:[h] [bitrate_mb] [fps]' or 'stop'):
 - 默认监听 `0.0.0.0:50001`（可通过参数修改）
 - 支持实时处理：自动检测关键帧并分段处理视频
 - 支持终端命令控制：输入 `start` 开始录制，`stop` 停止录制
+- **start 命令默认参数**：可通过环境变量配置（见上方环境变量配置部分）
+  - 如果只输入 `start`（无参数），会使用环境变量中的默认值
+  - 如果输入 `start 16:9 4 15`，会使用命令行参数（优先级高于环境变量）
+  - 如果 `DEFAULT_INCLUDE_ASPECT_RATIO=false`（默认），`start` 命令不会发送 `aspectRatio`，客户端会使用 UI 选择的宽高比
+  - 如果 `DEFAULT_INCLUDE_ASPECT_RATIO=true`，`start` 命令会发送环境变量中配置的宽高比
 - 详细使用说明请参考 `android-camera/README.md`
 
 **停止服务器**：
@@ -963,7 +977,7 @@ python streaming_server/test_qr_server.py
       1. 检测编码器实际输入色彩格式（从 MediaCodec outputFormat 获取）
       2. 如果为 Planar 格式，在送入编码器前将 NV12 转换为 I420
       3. 使用 CameraX 的实际帧时间戳（`image.imageInfo.timestamp`）而非固定间隔，确保视频时间轴准确
-      4. ImageAnalysis 和 Preview 使用相同的 `targetRotation`（displayRotation），让 HAL 统一处理旋转，避免双重旋转导致平面错位
+     4. 预览/取景使用显示方向的 `targetRotation`（Display rotation）；编码/采集使用物理方向+摄像头映射得到的 `rotationForBackend`，两者解耦，避免双重旋转或方向误判（实测竖直/左横/右横/倒置均与现实一致）
     - **关键代码**：`H264Encoder.encode()` 中根据 `encoderColorFormat` 动态选择 NV12 或 I420 格式
     - **额外收益**：使用真实帧时间戳后，视频 FPS 反映实际捕获速率（可能为非整数），播放速度与现实时间完美对齐
 
@@ -971,4 +985,11 @@ python streaming_server/test_qr_server.py
     - Android 15+ 要求所有原生库（.so 文件）对齐到 16KB 页面大小
     - ML Kit 17.3.0+ 已支持 16KB 对齐，使用该版本可避免兼容性警告
     - 在 `build.gradle.kts` 中设置 `packaging.jniLibs.useLegacyPackaging = false` 确保正确打包
+13. **WebSocket 分段过大导致客户端自停**：
+    - 现象：60s 分段在 1920x1920 @4fps，2MB 码率下单段约 12.8MB，Base64 后约 16.3MB，超过 OkHttp 客户端 WebSocket 发送队列硬上限（16MB），`send()` 返回 false，App 发送 error/capture_stopped 后断开
+    - 根因：客户端发送队列 16MB 硬限制，与服务器端 `WEBSOCKET_MAX_SIZE_MB` 无关
+    - 解决方案：降低单段体积，让 Base64 长度 <~15.5MB（约等于 MP4 <~11.6MB）
+      1) 缩短分段时长（例如 60s→30s）
+      2) 降低码率（实测 1MB 码率、60s 段约 6.9MB MP4，Base64 8.7MB，正常发送）
+      3) 降低分辨率或帧率
 
