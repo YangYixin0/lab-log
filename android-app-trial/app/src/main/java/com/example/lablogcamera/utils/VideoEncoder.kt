@@ -87,6 +87,21 @@ class VideoEncoder(
             tempFile = File.createTempFile("recording_", ".mp4")
             mediaMuxer = MediaMuxer(tempFile!!.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             
+            // 某些编码器不会发送 INFO_OUTPUT_FORMAT_CHANGED，需要主动获取 outputFormat
+            try {
+                val outputFormat = codec.outputFormat
+                Log.d(TAG, "Got output format: $outputFormat")
+                
+                // 添加视频轨道并启动 Muxer
+                videoTrackIndex = mediaMuxer?.addTrack(outputFormat) ?: -1
+                mediaMuxer?.start()
+                isStarted = true
+                
+                Log.d(TAG, "Video track added at start, index=$videoTrackIndex, isStarted=$isStarted")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to get output format at start, will wait for INFO_OUTPUT_FORMAT_CHANGED", e)
+            }
+            
             Log.d(TAG, "$codecType Encoder started successfully, colorFormat=$encoderColorFormat")
         } catch (e: IOException) {
             Log.e(TAG, "Failed to create encoder", e)
@@ -127,79 +142,128 @@ class VideoEncoder(
         
         try {
             val nv12Bytes = image.toNv12ByteArray(cropRect, rotationDegrees, timestamp, charWidth, charHeight)
+            
+            // 计算实际的 YUV 数据大小（编码器期望的大小）
+            val expectedSize = encoderWidth * encoderHeight * 3 / 2
+            
             val yuvBytes = if (encoderColorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar) {
-                nv12ToI420(nv12Bytes, cropRect.width(), cropRect.height())
+                // 需要 I420 格式
+                nv12ToI420(nv12Bytes, encoderWidth, encoderHeight)
             } else {
+                // NV12 格式
                 nv12Bytes
             }
             
-            val inputBufferIndex = codec.dequeueInputBuffer(10000)
-            if (inputBufferIndex >= 0) {
-                val inputBuffer = codec.getInputBuffer(inputBufferIndex)
-                if (inputBuffer != null) {
-                    inputBuffer.clear()
-                    if (inputBuffer.capacity() < yuvBytes.size) {
-                        Log.e(TAG, "Encoder input buffer too small")
-                        return
+            // 检查数据大小
+            if (yuvBytes.size != expectedSize) {
+                Log.w(TAG, "YUV data size mismatch: expected=$expectedSize, actual=${yuvBytes.size}")
+                // 如果大小不匹配，填充或截断
+                val adjustedBytes = ByteArray(expectedSize)
+                System.arraycopy(yuvBytes, 0, adjustedBytes, 0, minOf(yuvBytes.size, expectedSize))
+                
+                val inputBufferIndex = codec.dequeueInputBuffer(10000)
+                if (inputBufferIndex >= 0) {
+                    val inputBuffer = codec.getInputBuffer(inputBufferIndex)
+                    if (inputBuffer != null) {
+                        inputBuffer.clear()
+                        if (inputBuffer.capacity() < adjustedBytes.size) {
+                            Log.e(TAG, "Encoder input buffer too small: capacity=${inputBuffer.capacity()}, data=${adjustedBytes.size}")
+                            return
+                        }
+                        inputBuffer.put(adjustedBytes)
                     }
-                    inputBuffer.put(yuvBytes)
+                    val presentationTimeUs = image.imageInfo.timestamp / 1000L
+                    codec.queueInputBuffer(inputBufferIndex, 0, adjustedBytes.size, presentationTimeUs, 0)
                 }
-                val presentationTimeUs = image.imageInfo.timestamp / 1000L
-                codec.queueInputBuffer(inputBufferIndex, 0, yuvBytes.size, presentationTimeUs, 0)
+            } else {
+                val inputBufferIndex = codec.dequeueInputBuffer(10000)
+                if (inputBufferIndex >= 0) {
+                    val inputBuffer = codec.getInputBuffer(inputBufferIndex)
+                    if (inputBuffer != null) {
+                        inputBuffer.clear()
+                        if (inputBuffer.capacity() < yuvBytes.size) {
+                            Log.e(TAG, "Encoder input buffer too small: capacity=${inputBuffer.capacity()}, data=${yuvBytes.size}")
+                            return
+                        }
+                        inputBuffer.put(yuvBytes)
+                    }
+                    val presentationTimeUs = image.imageInfo.timestamp / 1000L
+                    codec.queueInputBuffer(inputBufferIndex, 0, yuvBytes.size, presentationTimeUs, 0)
+                }
             }
             
             val bufferInfo = MediaCodec.BufferInfo()
             var outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
             
             while (outputBufferIndex >= 0) {
-                if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    val format = codec.outputFormat
-                    val csd0 = format.getByteBuffer("csd-0")
-                    val csd1 = format.getByteBuffer("csd-1")
-                    if (csd0 != null) {
-                        cachedSpsBuffer = csd0.duplicate()
-                        cachedPpsBuffer = csd1?.duplicate()
-                        
-                        // 添加视频轨道
-                        if (videoTrackIndex < 0) {
-                            videoTrackIndex = mediaMuxer?.addTrack(format) ?: -1
-                            mediaMuxer?.start()
-                            isStarted = true
-                            Log.d(TAG, "Video track added, index=$videoTrackIndex")
+                when (outputBufferIndex) {
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        val format = codec.outputFormat
+                        Log.d(TAG, "Output format changed: $format")
+                        val csd0 = format.getByteBuffer("csd-0")
+                        val csd1 = format.getByteBuffer("csd-1")
+                        if (csd0 != null) {
+                            cachedSpsBuffer = csd0.duplicate()
+                            cachedPpsBuffer = csd1?.duplicate()
+                            
+                            // 添加视频轨道
+                            if (videoTrackIndex < 0) {
+                                videoTrackIndex = mediaMuxer?.addTrack(format) ?: -1
+                                mediaMuxer?.start()
+                                isStarted = true
+                                Log.d(TAG, "Video track added, index=$videoTrackIndex, isStarted=$isStarted")
+                            }
                         }
+                        outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
+                        continue
                     }
-                    outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
-                    continue
-                }
-                
-                val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
-                if (outputBuffer != null && bufferInfo.size > 0) {
-                    val encodedData = ByteArray(bufferInfo.size)
-                    outputBuffer.get(encodedData)
-                    
-                    val isKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-                    
-                    if (!isFirstKeyframeReceived && isKeyframe) {
-                        isFirstKeyframeReceived = true
-                        Log.d(TAG, "First keyframe received")
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                        Log.v(TAG, "dequeueOutputBuffer: try again later")
+                        break
                     }
-                    
-                    // 写入 MP4
-                    if (isStarted && videoTrackIndex >= 0) {
-                        if (firstFrameTimeUs < 0) {
-                            firstFrameTimeUs = bufferInfo.presentationTimeUs
+                    MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
+                        Log.d(TAG, "Output buffers changed")
+                        outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
+                        continue
+                    }
+                    else -> {
+                        // 正常的输出缓冲区
+                        val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
+                        if (outputBuffer != null && bufferInfo.size > 0) {
+                            val isKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                            
+                            if (!isFirstKeyframeReceived && isKeyframe) {
+                                isFirstKeyframeReceived = true
+                                Log.d(TAG, "First keyframe received")
+                            }
+                            
+                            // 写入 MP4
+                            if (isStarted && videoTrackIndex >= 0) {
+                                if (firstFrameTimeUs < 0) {
+                                    firstFrameTimeUs = bufferInfo.presentationTimeUs
+                                }
+                                
+                                // 直接使用 outputBuffer，不要重新分配
+                                outputBuffer.position(bufferInfo.offset)
+                                outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                                
+                                try {
+                                    mediaMuxer?.writeSampleData(videoTrackIndex, outputBuffer, bufferInfo)
+                                    frameCount++
+                                    if (frameCount == 1 || frameCount % 10 == 0) {
+                                        Log.d(TAG, "Written $frameCount frames")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed to write frame $frameCount", e)
+                                }
+                            } else {
+                                Log.w(TAG, "Skipping frame: isStarted=$isStarted, videoTrackIndex=$videoTrackIndex")
+                            }
                         }
-                        
-                        val buffer = ByteBuffer.allocate(bufferInfo.size)
-                        buffer.put(encodedData)
-                        buffer.position(bufferInfo.offset)
-                        buffer.limit(bufferInfo.offset + bufferInfo.size)
-                        mediaMuxer?.writeSampleData(videoTrackIndex, buffer, bufferInfo)
-                        frameCount++
+                        codec.releaseOutputBuffer(outputBufferIndex, false)
+                        outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
                     }
                 }
-                codec.releaseOutputBuffer(outputBufferIndex, false)
-                outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
             }
         } catch (e: Exception) {
             if (e !is IllegalStateException) {
@@ -213,25 +277,60 @@ class VideoEncoder(
      */
     fun stop(): Pair<ByteArray, VideoMetadata>? {
         return try {
-            // 停止 Muxer
+            val codec = mediaCodec
+            
+            Log.d(TAG, "Stopping encoder, frames written so far: $frameCount")
+            
+            // 1. 发送 EOS 信号给编码器
+            if (codec != null) {
+                try {
+                    val inputBufferIndex = codec.dequeueInputBuffer(10000)
+                    if (inputBufferIndex >= 0) {
+                        codec.queueInputBuffer(
+                            inputBufferIndex, 
+                            0, 
+                            0, 
+                            System.nanoTime() / 1000, 
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        )
+                        Log.d(TAG, "EOS signal sent to encoder")
+                    }
+                    
+                    // 2. 等待 EOS 从编码器返回（在 encode() 线程中处理）
+                    // 给编码器一些时间处理最后的帧
+                    Thread.sleep(500)
+                    
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to send EOS", e)
+                }
+            }
+            
+            Log.d(TAG, "Total frames written: $frameCount")
+            
+            // 3. 停止 Muxer
             if (isStarted) {
-                mediaMuxer?.stop()
+                try {
+                    mediaMuxer?.stop()
+                    Log.d(TAG, "Muxer stopped")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to stop muxer", e)
+                }
             }
             mediaMuxer?.release()
             mediaMuxer = null
             
-            // 停止编码器
-            mediaCodec?.let { codec ->
+            // 4. 停止编码器
+            mediaCodec?.let { c ->
                 try {
-                    codec.stop()
-                    codec.release()
+                    c.stop()
+                    c.release()
                 } catch (e: IllegalStateException) {
                     Log.w(TAG, "Codec stop/release skipped", e)
                 }
             }
             mediaCodec = null
             
-            // 读取 MP4 数据
+            // 5. 读取 MP4 数据
             val mp4Data = tempFile?.readBytes()
             val metadata = VideoMetadata(
                 width = encoderWidth,
@@ -241,11 +340,13 @@ class VideoEncoder(
                 frameCount = frameCount
             )
             
-            // 清理临时文件
+            Log.d(TAG, "MP4 file size: ${mp4Data?.size ?: 0} bytes, path: ${tempFile?.absolutePath}")
+            
+            // 6. 清理临时文件
             tempFile?.delete()
             tempFile = null
             
-            // 重置状态
+            // 7. 重置状态
             isFirstKeyframeReceived = false
             videoTrackIndex = -1
             isStarted = false
@@ -255,6 +356,7 @@ class VideoEncoder(
             if (mp4Data != null && mp4Data.isNotEmpty()) {
                 mp4Data to metadata
             } else {
+                Log.e(TAG, "MP4 data is empty or null")
                 null
             }
         } catch (e: Exception) {

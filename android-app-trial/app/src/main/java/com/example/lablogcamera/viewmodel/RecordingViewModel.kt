@@ -139,6 +139,24 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
             
             // 只在录制时处理帧
             if (_recordingState.value == RecordingState.RECORDING) {
+                // 第一帧：初始化编码器
+                if (videoEncoder == null) {
+                    val bitrate = (ConfigManager.videoBitrateMbps * 1_000_000).toInt()
+                    val fps = ConfigManager.videoFps
+                    
+                    videoEncoder = VideoEncoder(
+                        preferH265 = ConfigManager.preferH265,
+                        onVideoComplete = { _, _ -> }
+                    )
+                    
+                    encoderWidth = targetWidth
+                    encoderHeight = targetHeight
+                    
+                    videoEncoder?.start(encoderWidth, encoderHeight, bitrate, fps)
+                    
+                    Log.d(TAG, "Encoder initialized: ImageAnalysis actual=${imageWidth}x${imageHeight}, encoder=${encoderWidth}x${encoderHeight}, bitrate=${bitrate}bps, fps=${fps}fps")
+                }
+                
                 val encoder = videoEncoder
                 if (encoder != null) {
                     // 计算当前时间戳
@@ -198,37 +216,49 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // 获取分辨率
-                val analysis = imageAnalysis.value
-                if (analysis == null) {
-                    _errorMessage.value = "相机未初始化"
-                    return@launch
-                }
-                
                 // 使用配置的分辨率上限
                 val resolutionLimit = ConfigManager.videoResolutionLimit
-                encoderWidth = resolutionLimit
-                encoderHeight = resolutionLimit
                 
-                // 创建编码器
-                val bitrate = (ConfigManager.videoBitrateMbps * 1_000_000).toInt()
-                val fps = ConfigManager.videoFps
+                // 创建高分辨率的 ImageAnalysis（请求最大可能的分辨率）
+                // 参考原始 MainActivity.kt，使用 setTargetResolution 明确请求高分辨率
+                val targetResolution = android.util.Size(resolutionLimit, resolutionLimit)
                 
-                videoEncoder = VideoEncoder(
-                    preferH265 = ConfigManager.preferH265,
-                    onVideoComplete = { _, _ -> }
-                )
+                Log.d(TAG, "Requesting ImageAnalysis resolution: ${targetResolution.width}x${targetResolution.height}")
                 
-                videoEncoder?.start(encoderWidth, encoderHeight, bitrate, fps)
+                val analysisBuilder = ImageAnalysis.Builder()
+                    .setTargetResolution(targetResolution)  // 请求 1920×1920
+                    .setTargetRotation(android.view.Surface.ROTATION_0)
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 
-                // 更新状态
+                val analysis = analysisBuilder.build()
+                
+                // 设置 Analyzer（在第一帧时获取实际分辨率并启动编码器）
+                analysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                    try {
+                        processFrame(imageProxy, resolutionLimit)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error processing frame", e)
+                    } finally {
+                        imageProxy.close()
+                    }
+                }
+                
+                // 更新 ImageAnalysis（这会触发 CameraPreview 重新绑定相机）
+                withContext(Dispatchers.Main) {
+                    _imageAnalysis.value = analysis
+                }
+                
+                // 等待相机绑定和第一帧到达
+                delay(100)
+                
+                // 更新状态为录制中
                 recordingStartTime = System.currentTimeMillis()
                 lastFpsUpdateTime = recordingStartTime
                 frameCount = 0
                 _recordingDuration.value = 0
                 _recordingState.value = RecordingState.RECORDING
                 
-                Log.d(TAG, "Recording started: ${encoderWidth}x${encoderHeight}, ${bitrate}bps, ${fps}fps")
+                Log.d(TAG, "Recording state changed to RECORDING")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start recording", e)
                 _errorMessage.value = "录制失败: ${e.message}"
@@ -316,6 +346,13 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun clearError() {
         _errorMessage.value = null
+    }
+    
+    /**
+     * 清除已完成的视频ID（避免重复导航）
+     */
+    fun clearCompletedVideo() {
+        _completedVideoId.value = null
     }
     
     override fun onCleared() {

@@ -53,10 +53,12 @@ fun RecordingScreen(
         viewModel.createImageAnalysis()
     }
     
-    // 录制完成后，自动跳转到详情页
+    // 录制完成后，自动跳转到详情页（只跳转一次）
     LaunchedEffect(completedVideoId) {
         if (completedVideoId != null) {
             onNavigateToDetail(completedVideoId!!)
+            // 清除状态，避免返回后再次跳转
+            viewModel.clearCompletedVideo()
         }
     }
     
@@ -65,11 +67,11 @@ fun RecordingScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 相机预览区域（正方形）
+        // 相机预览区域（宽高比2:1，高度约为屏幕宽度的一半）
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(1f)
+                .aspectRatio(2f)
                 .background(Color.Black)
         ) {
             // 相机预览
