@@ -2,6 +2,7 @@ package com.example.lablogcamera.ui
 
 import android.hardware.camera2.CameraCharacteristics
 import android.util.Log
+import android.view.OrientationEventListener
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -47,6 +48,31 @@ fun RecordingScreen(
     val prompt by viewModel.prompt.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val completedVideoId by viewModel.completedVideoId.collectAsState()
+    
+    // 监听设备物理方向变化
+    DisposableEffect(context) {
+        val orientationListener = object : OrientationEventListener(context) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                // 将连续的方向角度转换为离散的旋转角度
+                val rotation = when {
+                    orientation >= 315 || orientation < 45 -> 0      // 竖向（正常）
+                    orientation >= 45 && orientation < 135 -> 90     // 右横向
+                    orientation >= 135 && orientation < 225 -> 180   // 倒置
+                    orientation >= 225 && orientation < 315 -> 270   // 左横向
+                    else -> 0
+                }
+                // 更新 ViewModel 中的物理方向状态
+                viewModel.updateDevicePhysicalRotation(rotation)
+            }
+        }
+        if (orientationListener.canDetectOrientation()) {
+            orientationListener.enable()
+        }
+        onDispose { 
+            orientationListener.disable() 
+        }
+    }
     
     // 创建 ImageAnalysis
     LaunchedEffect(Unit) {

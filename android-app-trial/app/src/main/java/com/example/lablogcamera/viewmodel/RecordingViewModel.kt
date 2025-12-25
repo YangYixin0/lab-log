@@ -71,6 +71,24 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     // ImageAnalysis
     val imageAnalysis = mutableStateOf<ImageAnalysis?>(null)
     
+    // 设备物理方向（0=竖放, 90=右横, 180=倒置, 270=左横）
+    private val _devicePhysicalRotation = MutableStateFlow(0)
+    
+    /**
+     * 更新设备物理方向（从 UI 的 OrientationEventListener 调用）
+     */
+    fun updateDevicePhysicalRotation(rotation: Int) {
+        _devicePhysicalRotation.value = rotation
+    }
+    
+    /**
+     * 根据设备物理旋转计算后端需要的 rotation 值
+     * 后置摄像头：rotationForBackend = (physicalRotation + 90) % 360
+     */
+    private fun calculateRotationForBackend(physicalRotation: Int): Int {
+        return (physicalRotation + 90) % 360
+    }
+    
     // 视频编码器
     private var videoEncoder: VideoEncoder? = null
     
@@ -99,7 +117,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     }
     
     /**
-     * 创建 ImageAnalysis
+     * 创建 ImageAnalysis（在 startRecording 时创建并设置 analyzer）
      */
     fun createImageAnalysis(): ImageAnalysis {
         val resolutionLimit = ConfigManager.videoResolutionLimit
@@ -109,10 +127,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
         
-        analysis.setAnalyzer(analysisExecutor) { image ->
-            processFrame(image, resolutionLimit)
-        }
-        
+        // 不在这里设置 analyzer，在 startRecording 时设置
         imageAnalysis.value = analysis
         return analysis
     }
@@ -122,88 +137,85 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
      */
     @SuppressLint("UnsafeOptInUsageError")
     private fun processFrame(image: ImageProxy, resolutionLimit: Int) {
-        try {
-            // 应用分辨率上限
-            val imageWidth = image.width
-            val imageHeight = image.height
-            val (targetWidth, targetHeight) = applyResolutionLimit(imageWidth, imageHeight, resolutionLimit)
-            
-            // 计算裁剪区域
-            val cropRect = if (targetWidth != imageWidth || targetHeight != imageHeight) {
-                // 需要裁剪，居中裁剪
-                val left = (imageWidth - targetWidth) / 2
-                val top = (imageHeight - targetHeight) / 2
-                Rect(left, top, left + targetWidth, top + targetHeight)
-            } else {
-                // 不需要裁剪
-                Rect(0, 0, imageWidth, imageHeight)
+        // 应用分辨率上限
+        val imageWidth = image.width
+        val imageHeight = image.height
+        val (targetWidth, targetHeight) = applyResolutionLimit(imageWidth, imageHeight, resolutionLimit)
+        
+        // 计算裁剪区域
+        val cropRect = if (targetWidth != imageWidth || targetHeight != imageHeight) {
+            // 需要裁剪，居中裁剪
+            val left = (imageWidth - targetWidth) / 2
+            val top = (imageHeight - targetHeight) / 2
+            Rect(left, top, left + targetWidth, top + targetHeight)
+        } else {
+            // 不需要裁剪
+            Rect(0, 0, imageWidth, imageHeight)
+        }
+        
+        // 只在录制时处理帧
+        if (_recordingState.value == RecordingState.RECORDING) {
+            // 第一帧：初始化编码器
+            if (videoEncoder == null) {
+                val bitrate = (ConfigManager.videoBitrateMbps * 1_000_000).toInt()
+                val fps = ConfigManager.videoFps
+                
+                videoEncoder = VideoEncoder(
+                    preferH265 = ConfigManager.preferH265,
+                    onVideoComplete = { _, _ -> }
+                )
+                
+                encoderWidth = targetWidth
+                encoderHeight = targetHeight
+                
+                videoEncoder?.start(encoderWidth, encoderHeight, bitrate, fps)
+                
+                Log.d(TAG, "Encoder initialized: ImageAnalysis actual=${imageWidth}x${imageHeight}, encoder=${encoderWidth}x${encoderHeight}, bitrate=${bitrate}bps, fps=${fps}fps")
             }
             
-            // 只在录制时处理帧
-            if (_recordingState.value == RecordingState.RECORDING) {
-                // 第一帧：初始化编码器
-                if (videoEncoder == null) {
-                    val bitrate = (ConfigManager.videoBitrateMbps * 1_000_000).toInt()
-                    val fps = ConfigManager.videoFps
-                    
-                    videoEncoder = VideoEncoder(
-                        preferH265 = ConfigManager.preferH265,
-                        onVideoComplete = { _, _ -> }
-                    )
-                    
-                    encoderWidth = targetWidth
-                    encoderHeight = targetHeight
-                    
-                    videoEncoder?.start(encoderWidth, encoderHeight, bitrate, fps)
-                    
-                    Log.d(TAG, "Encoder initialized: ImageAnalysis actual=${imageWidth}x${imageHeight}, encoder=${encoderWidth}x${encoderHeight}, bitrate=${bitrate}bps, fps=${fps}fps")
+            val encoder = videoEncoder
+            if (encoder != null) {
+                // 计算当前时间戳
+                val currentTime = System.currentTimeMillis()
+                val elapsedSeconds = ((currentTime - recordingStartTime) / 1000).toInt()
+                
+                // 更新录制时长
+                _recordingDuration.value = elapsedSeconds
+                
+                // 检查是否达到最大时长
+                if (elapsedSeconds >= ConfigManager.videoMaxDurationSeconds) {
+                    viewModelScope.launch {
+                        stopRecording()
+                    }
+                    return
                 }
                 
-                val encoder = videoEncoder
-                if (encoder != null) {
-                    // 计算当前时间戳
-                    val currentTime = System.currentTimeMillis()
-                    val elapsedSeconds = ((currentTime - recordingStartTime) / 1000).toInt()
-                    
-                    // 更新录制时长
-                    _recordingDuration.value = elapsedSeconds
-                    
-                    // 检查是否达到最大时长
-                    if (elapsedSeconds >= ConfigManager.videoMaxDurationSeconds) {
-                        viewModelScope.launch {
-                            stopRecording()
-                        }
-                        image.close()
-                        return
-                    }
-                    
-                    // 生成时间戳字符串
-                    val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-                    val timestampStr = "Time: ${sdf.format(Date(currentTime))}"
-                    
-                    // 编码帧
-                    encoder.encode(
-                        image = image,
-                        cropRect = cropRect,
-                        rotationDegrees = 0,  // 固定后置摄像头，不旋转
-                        timestamp = timestampStr,
-                        charWidth = 20,
-                        charHeight = 30
-                    )
-                    
-                    // 更新帧率
-                    frameCount++
-                    if (currentTime - lastFpsUpdateTime >= 1000) {
-                        _currentFps.value = frameCount.toFloat()
-                        frameCount = 0
-                        lastFpsUpdateTime = currentTime
-                    }
+                // 生成时间戳字符串
+                val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                val timestampStr = "Time: ${sdf.format(Date(currentTime))}"
+                
+                // 根据设备物理方向动态计算旋转角度
+                val physicalRotation = _devicePhysicalRotation.value
+                val rotationForEncoding = calculateRotationForBackend(physicalRotation)
+                
+                // 编码帧（根据手机姿态动态旋转）
+                encoder.encode(
+                    image = image,
+                    cropRect = cropRect,
+                    rotationDegrees = rotationForEncoding,
+                    timestamp = timestampStr,
+                    charWidth = 20,
+                    charHeight = 30
+                )
+                
+                // 更新帧率
+                frameCount++
+                if (currentTime - lastFpsUpdateTime >= 1000) {
+                    _currentFps.value = frameCount.toFloat()
+                    frameCount = 0
+                    lastFpsUpdateTime = currentTime
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Frame processing error", e)
-        } finally {
-            image.close()
         }
     }
     

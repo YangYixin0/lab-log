@@ -1,6 +1,7 @@
 package com.example.lablogcamera.ui
 
 import android.net.Uri
+import android.widget.MediaController
 import android.widget.VideoView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -214,6 +215,11 @@ fun VideoPlayer(videoPath: String) {
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
                 VideoView(context).apply {
+                    // 添加播放控制器
+                    val mediaController = MediaController(context)
+                    mediaController.setAnchorView(this)
+                    setMediaController(mediaController)
+                    
                     // 使用文件 URI
                     setVideoURI(Uri.parse("file://$videoPath"))
                     setOnPreparedListener { mediaPlayer ->
