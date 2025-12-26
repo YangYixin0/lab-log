@@ -75,5 +75,25 @@ object ConfigManager {
     // 超时设置
     val apiTimeoutMs: Long
         get() = getProperty("api_timeout_ms", "120000").toLongOrNull() ?: 120000L
+    
+    // 视频理解参数
+    val videoFpsForApi: Float
+        get() = getProperty("video_fps", "2.0").toFloatOrNull() ?: 2.0f
+    
+    val enableThinking: Boolean
+        get() = getProperty("enable_thinking", "true").equals("true", ignoreCase = true)
+    
+    val thinkingBudget: Int
+        get() = getProperty("thinking_budget", "8192").toIntOrNull() ?: 8192
+    
+    val vlHighResolutionImages: Boolean
+        get() = getProperty("vl_high_resolution_images", "true").equals("true", ignoreCase = true)
+    
+    val vlTemperature: Float
+        get() = getProperty("vl_temperature", "0.1").toFloatOrNull() ?: 0.1f
+    
+    val vlTopP: Float
+        get() = getProperty("vl_top_p", "0.7").toFloatOrNull() ?: 0.7f
 }
+
 

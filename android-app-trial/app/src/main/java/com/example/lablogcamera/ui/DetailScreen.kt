@@ -56,6 +56,7 @@ fun DetailScreen(
     // 重新理解相关状态
     var showReunderstandDialog by remember { mutableStateOf(false) }
     var reunderstandPrompt by remember { mutableStateOf(VideoUnderstandingService.DEFAULT_PROMPT) }
+    var selectedModel by remember { mutableStateOf(ConfigManager.qwenModel) }
     
     // 加载录制记录
     LaunchedEffect(videoId) {
@@ -176,11 +177,55 @@ fun DetailScreen(
     if (showReunderstandDialog) {
         AlertDialog(
             onDismissRequest = { showReunderstandDialog = false },
-            title = { Text("重新理解") },
+            title = { Text("视频理解参数") },
             text = {
-                Column {
-                    Text("编辑提示词:")
-                    Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 模型选择
+                    Text(
+                        text = "模型:",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            RadioButton(
+                                selected = selectedModel == "qwen3-vl-flash",
+                                onClick = { selectedModel = "qwen3-vl-flash" }
+                            )
+                            Text(
+                                text = "qwen3-vl-flash",
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            RadioButton(
+                                selected = selectedModel == "qwen3-vl-plus",
+                                onClick = { selectedModel = "qwen3-vl-plus" }
+                            )
+                            Text(
+                                text = "qwen3-vl-plus",
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    // 提示词输入
+                    Text(
+                        text = "提示词:",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium
+                    )
                     OutlinedTextField(
                         value = reunderstandPrompt,
                         onValueChange = { reunderstandPrompt = it },
@@ -194,7 +239,7 @@ fun DetailScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.startUnderstanding(reunderstandPrompt)
+                        viewModel.startUnderstanding(reunderstandPrompt, selectedModel)
                         showReunderstandDialog = false
                     }
                 ) {
@@ -242,7 +287,7 @@ fun VideoPlayer(videoPath: String) {
 }
 
 /**
- * 视频信息卡片
+ * 视频信息卡片（可折叠）
  */
 @Composable
 fun VideoInfoCard(
@@ -251,20 +296,42 @@ fun VideoInfoCard(
     bitrate: Float,
     codec: String
 ) {
+    var expanded by remember { mutableStateOf(false) }
+    
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Text(
-                text = "视频信息",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Text("分辨率: $resolution")
-            Text("帧率: %.1f fps".format(fps))
-            Text("码率: %.2f Mbps".format(bitrate))
-            Text("编码: $codec")
+        Column(modifier = Modifier.padding(16.dp)) {
+            // 标题行（带折叠按钮）
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "视频信息",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                IconButton(onClick = { expanded = !expanded }) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (expanded) "收起" else "展开"
+                    )
+                }
+            }
+            
+            // 可折叠内容
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier.padding(top = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("分辨率: $resolution")
+                    Text("帧率: %.1f fps".format(fps))
+                    Text("码率: %.2f Mbps".format(bitrate))
+                    Text("编码: $codec")
+                }
+            }
         }
     }
 }
@@ -577,18 +644,21 @@ fun JsonSection(
                 containerColor = MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
-            Text(
-                text = json.ifEmpty { "暂无数据" },
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(max = 400.dp)  // 限制最大高度
+                    .verticalScroll(rememberScrollState())
                     .padding(12.dp)
-                    .verticalScroll(rememberScrollState()),
-                style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                ),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = Int.MAX_VALUE
-            )
+            ) {
+                Text(
+                    text = json.ifEmpty { "暂无数据" },
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }

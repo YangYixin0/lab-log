@@ -25,7 +25,13 @@ private const val TAG = "VideoUnderstandingService"
 class VideoUnderstandingService(
     private val apiKey: String,
     private val model: String = "qwen3-vl-flash",
-    private val timeoutMs: Long = 120000L
+    private val timeoutMs: Long = 120000L,
+    private val videoFps: Float = 2.0f,
+    private val enableThinking: Boolean = true,
+    private val thinkingBudget: Int = 8192,
+    private val highResolutionImages: Boolean = true,
+    private val temperature: Float = 0.1f,
+    private val topP: Float = 0.7f
 ) {
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
@@ -133,7 +139,8 @@ class VideoUnderstandingService(
                         "role" to "user",
                         "content" to listOf(
                             mapOf(
-                                "video" to "data:video/mp4;base64,$videoBase64"
+                                "video" to "data:video/mp4;base64,$videoBase64",
+                                "video_fps" to videoFps
                             ),
                             mapOf(
                                 "text" to prompt
@@ -145,6 +152,19 @@ class VideoUnderstandingService(
             add("parameters", JsonObject().apply {
                 addProperty("incremental_output", true)
                 addProperty("result_format", "message")
+                
+                // 添加视频理解参数
+                if (enableThinking) {
+                    addProperty("enable_thinking", true)
+                    addProperty("thinking_budget", thinkingBudget)
+                }
+                
+                if (highResolutionImages) {
+                    addProperty("vl_high_resolution_images", true)
+                }
+                
+                addProperty("temperature", temperature)
+                addProperty("top_p", topP)
             })
         }
         

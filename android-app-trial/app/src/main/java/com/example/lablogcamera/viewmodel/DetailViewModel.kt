@@ -24,11 +24,6 @@ private const val TAG = "DetailViewModel"
  */
 class DetailViewModel(application: Application) : AndroidViewModel(application) {
     private val storageManager = StorageManager(application)
-    private val videoUnderstandingService = VideoUnderstandingService(
-        apiKey = ConfigManager.apiKey,
-        model = ConfigManager.qwenModel,
-        timeoutMs = ConfigManager.apiTimeoutMs
-    )
     
     private val _recording = MutableStateFlow<RecordingItem?>(null)
     val recording: StateFlow<RecordingItem?> = _recording.asStateFlow()
@@ -69,7 +64,7 @@ class DetailViewModel(application: Application) : AndroidViewModel(application) 
     /**
      * 开始理解视频
      */
-    fun startUnderstanding(prompt: String) {
+    fun startUnderstanding(prompt: String, model: String = ConfigManager.qwenModel) {
         val recording = _recording.value
         if (recording == null) {
             _errorMessage.value = "录制记录不存在"
@@ -104,6 +99,19 @@ class DetailViewModel(application: Application) : AndroidViewModel(application) 
                     _isUnderstanding.value = false
                     return@launch
                 }
+                
+                // 根据选择的模型创建服务实例
+                val videoUnderstandingService = VideoUnderstandingService(
+                    apiKey = ConfigManager.apiKey,
+                    model = model,
+                    timeoutMs = ConfigManager.apiTimeoutMs,
+                    videoFps = ConfigManager.videoFpsForApi,
+                    enableThinking = ConfigManager.enableThinking,
+                    thinkingBudget = ConfigManager.thinkingBudget,
+                    highResolutionImages = ConfigManager.vlHighResolutionImages,
+                    temperature = ConfigManager.vlTemperature,
+                    topP = ConfigManager.vlTopP
+                )
                 
                 videoUnderstandingService.understandVideo(
                     videoFile = videoFile,
@@ -168,4 +176,5 @@ class DetailViewModel(application: Application) : AndroidViewModel(application) 
         _canUse.value = UsageCounter.canUse(getApplication(), ConfigManager.maxApiCalls)
     }
 }
+
 
