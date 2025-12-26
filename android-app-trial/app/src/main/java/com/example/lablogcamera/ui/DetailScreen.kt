@@ -75,7 +75,8 @@ fun DetailScreen(
                         text = "已理解 $usageCount 次",
                         modifier = Modifier.padding(end = 16.dp)
                     )
-                }
+                },
+                windowInsets = WindowInsets(0, 0, 0, 0)  // 移除所有默认内边距
             )
         }
     ) { paddingValues ->

@@ -2,6 +2,8 @@ package com.example.lablogcamera.storage
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.util.Log
 import com.example.lablogcamera.data.RecordingItem
@@ -195,11 +197,27 @@ class StorageManager(private val context: Context) {
             val bitrate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull() ?: 0L
             val bitrateMbps = bitrate / 1_000_000f
             
-            // 尝试获取帧率（部分设备可能不支持）
-            val fps = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull() ?: 0f
-            } else {
-                0f
+            // 使用 MediaExtractor 获取真实帧率
+            var fps = 0f
+            try {
+                val extractor = MediaExtractor()
+                extractor.setDataSource(videoPath)
+                
+                // 查找视频轨道
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                    if (mime.startsWith("video/")) {
+                        // 尝试从 format 中获取帧率
+                        if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                            fps = format.getInteger(MediaFormat.KEY_FRAME_RATE).toFloat()
+                        }
+                        break
+                    }
+                }
+                extractor.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to extract frame rate using MediaExtractor", e)
             }
             
             // 检测编码格式

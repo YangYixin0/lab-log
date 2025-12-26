@@ -2,9 +2,12 @@ package com.example.lablogcamera.ui
 
 import android.hardware.camera2.CameraCharacteristics
 import android.util.Log
+import android.util.Rational
 import android.view.OrientationEventListener
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -48,6 +51,12 @@ fun RecordingScreen(
     val prompt by viewModel.prompt.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val completedVideoId by viewModel.completedVideoId.collectAsState()
+    val analysisResolution by viewModel.analysisResolution.collectAsState()
+    
+    // 计算预览宽高比（基于实际的 ImageAnalysis 分辨率）
+    val previewAspectRatio = analysisResolution?.let { (width, height) ->
+        width.toFloat() / height.toFloat()
+    } ?: 1f  // 默认 1:1
     
     // 监听设备物理方向变化
     DisposableEffect(context) {
@@ -93,17 +102,18 @@ fun RecordingScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 相机预览区域（宽高比2:1，高度约为屏幕宽度的一半）
+        // 相机预览区域（动态宽高比，匹配实际的 ImageAnalysis 分辨率）
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(2f)
+                .aspectRatio(previewAspectRatio)
                 .background(Color.Black)
         ) {
             // 相机预览
             CameraPreview(
                 viewModel = viewModel,
-                lifecycleOwner = lifecycleOwner
+                lifecycleOwner = lifecycleOwner,
+                analysisResolution = analysisResolution
             )
             
             // 录制状态显示
@@ -255,7 +265,8 @@ fun RecordingScreen(
 @Composable
 fun CameraPreview(
     viewModel: RecordingViewModel,
-    lifecycleOwner: androidx.lifecycle.LifecycleOwner
+    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+    analysisResolution: Pair<Int, Int>?
 ) {
     val context = LocalContext.current
     val imageAnalysis by viewModel.imageAnalysis
@@ -284,15 +295,28 @@ fun CameraPreview(
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
             
-            // 绑定相机
-            if (imageAnalysis != null) {
+            // 如果 ImageAnalysis 存在，使用 ViewPort + UseCaseGroup 确保 FOV 一致
+            if (imageAnalysis != null && analysisResolution != null) {
+                // 根据 ImageAnalysis 的实际分辨率创建动态 ViewPort
+                val (width, height) = analysisResolution
+                val viewPort = ViewPort.Builder(
+                    Rational(width, height),  // 使用实际分辨率的宽高比
+                    android.view.Surface.ROTATION_0
+                ).build()
+                
+                // 创建 UseCaseGroup，所有 UseCase 共享同一个 ViewPort
+                val useCaseGroup = UseCaseGroup.Builder()
+                    .addUseCase(preview)
+                    .addUseCase(imageAnalysis!!)
+                    .setViewPort(viewPort)
+                    .build()
+                
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     cameraSelector,
-                    preview,
-                    imageAnalysis
+                    useCaseGroup
                 )
-                Log.d(TAG, "Camera bound with ImageAnalysis")
+                Log.d(TAG, "Camera bound with ViewPort + ImageAnalysis")
             } else {
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner,

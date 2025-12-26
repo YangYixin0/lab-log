@@ -71,6 +71,10 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     // ImageAnalysis
     val imageAnalysis = mutableStateOf<ImageAnalysis?>(null)
     
+    // ImageAnalysis 实际分辨率（用于动态调整预览宽高比）
+    private val _analysisResolution = MutableStateFlow<Pair<Int, Int>?>(null)
+    val analysisResolution: StateFlow<Pair<Int, Int>?> = _analysisResolution.asStateFlow()
+    
     // 设备物理方向（0=竖放, 90=右横, 180=倒置, 270=左横）
     private val _devicePhysicalRotation = MutableStateFlow(0)
     
@@ -141,6 +145,12 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         val imageWidth = image.width
         val imageHeight = image.height
         val (targetWidth, targetHeight) = applyResolutionLimit(imageWidth, imageHeight, resolutionLimit)
+        
+        // 首次获取分辨率时，更新给 UI（用于动态调整预览宽高比）
+        if (_analysisResolution.value == null) {
+            _analysisResolution.value = Pair(targetWidth, targetHeight)
+            Log.d(TAG, "ImageAnalysis resolution: ${targetWidth}x${targetHeight}")
+        }
         
         // 计算裁剪区域
         val cropRect = if (targetWidth != imageWidth || targetHeight != imageHeight) {
@@ -230,6 +240,10 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // 清理旧的编码器（确保每次录制都是全新的）
+                videoEncoder?.stop()
+                videoEncoder = null
+                
                 // 使用配置的分辨率上限
                 val resolutionLimit = ConfigManager.videoResolutionLimit
                 
@@ -328,6 +342,10 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun resetRecording() {
         viewModelScope.launch {
+            // 清理旧的编码器
+            videoEncoder?.stop()
+            videoEncoder = null
+            
             // 删除之前的录制
             _completedVideoId.value?.let { videoId ->
                 storageManager.deleteRecording(videoId)
