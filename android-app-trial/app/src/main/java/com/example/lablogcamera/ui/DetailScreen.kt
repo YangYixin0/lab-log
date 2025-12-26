@@ -177,63 +177,79 @@ fun DetailScreen(
     if (showReunderstandDialog) {
         AlertDialog(
             onDismissRequest = { showReunderstandDialog = false },
-            title = { Text("视频理解参数") },
+            title = { 
+                Text(
+                    text = "视频理解参数",
+                    style = MaterialTheme.typography.titleLarge
+                ) 
+            },
             text = {
-                Column(
-                    modifier = Modifier.verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                Box(
+                    modifier = Modifier
+                        .width(500.dp)  // 固定宽度，更宽
+                        .heightIn(max = 600.dp)  // 最大高度，更高
                 ) {
-                    // 模型选择
-                    Text(
-                        text = "模型:",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            RadioButton(
-                                selected = selectedModel == "qwen3-vl-flash",
-                                onClick = { selectedModel = "qwen3-vl-flash" }
-                            )
-                            Text(
-                                text = "qwen3-vl-flash",
-                                modifier = Modifier.padding(start = 8.dp)
-                            )
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            RadioButton(
-                                selected = selectedModel == "qwen3-vl-plus",
-                                onClick = { selectedModel = "qwen3-vl-plus" }
-                            )
-                            Text(
-                                text = "qwen3-vl-plus",
-                                modifier = Modifier.padding(start = 8.dp)
-                            )
-                        }
-                    }
-                    
-                    Spacer(modifier = Modifier.height(4.dp))
-                    
-                    // 提示词输入
-                    Text(
-                        text = "提示词:",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium
-                    )
-                    OutlinedTextField(
-                        value = reunderstandPrompt,
-                        onValueChange = { reunderstandPrompt = it },
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 200.dp),
-                        maxLines = 10
-                    )
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)  // 减少间距：12dp -> 8dp
+                    ) {
+                        // 模型选择
+                        Text(
+                            text = "模型:",
+                            style = MaterialTheme.typography.bodyMedium,  // 改小：bodyLarge -> bodyMedium
+                            fontWeight = FontWeight.Medium
+                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {  // 减少间距：4dp -> 2dp
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                RadioButton(
+                                    selected = selectedModel == "qwen3-vl-flash",
+                                    onClick = { selectedModel = "qwen3-vl-flash" }
+                                )
+                                Text(
+                                    text = "qwen3-vl-flash",
+                                    style = MaterialTheme.typography.bodyMedium,  // 统一字体大小
+                                    modifier = Modifier.padding(start = 4.dp)  // 减少间距：8dp -> 4dp
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                RadioButton(
+                                    selected = selectedModel == "qwen3-vl-plus",
+                                    onClick = { selectedModel = "qwen3-vl-plus" }
+                                )
+                                Text(
+                                    text = "qwen3-vl-plus",
+                                    style = MaterialTheme.typography.bodyMedium,  // 统一字体大小
+                                    modifier = Modifier.padding(start = 4.dp)  // 减少间距：8dp -> 4dp
+                                )
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(2.dp))  // 减少间距：4dp -> 2dp
+                        
+                        // 提示词输入
+                        Text(
+                            text = "提示词:",
+                            style = MaterialTheme.typography.bodyMedium,  // 改小：bodyLarge -> bodyMedium
+                            fontWeight = FontWeight.Medium
+                        )
+                        OutlinedTextField(
+                            value = reunderstandPrompt,
+                            onValueChange = { reunderstandPrompt = it },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(400.dp),  // 固定高度，更高：200dp -> 400dp
+                            textStyle = MaterialTheme.typography.bodySmall,  // 文本字体改小
+                            maxLines = Int.MAX_VALUE  // 不限制行数
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -250,7 +266,10 @@ fun DetailScreen(
                 TextButton(onClick = { showReunderstandDialog = false }) {
                     Text("取消")
                 }
-            }
+            },
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false  // 不使用默认宽度限制
+            )
         )
     }
 }
