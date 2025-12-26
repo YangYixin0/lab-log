@@ -129,7 +129,7 @@ fun MainScreen(navController: NavHostController) {
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "已理解 $usageCount 次",
+                                text = "已理解 $usageCount / ${ConfigManager.maxApiCalls} 次",
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         }

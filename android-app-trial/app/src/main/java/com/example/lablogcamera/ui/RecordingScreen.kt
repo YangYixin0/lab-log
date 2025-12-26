@@ -19,10 +19,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -43,12 +41,10 @@ fun RecordingScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val clipboardManager = LocalClipboardManager.current
     
     val recordingState by viewModel.recordingState.collectAsState()
     val recordingDuration by viewModel.recordingDuration.collectAsState()
     val currentFps by viewModel.currentFps.collectAsState()
-    val prompt by viewModel.prompt.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val completedVideoId by viewModel.completedVideoId.collectAsState()
     val analysisResolution by viewModel.analysisResolution.collectAsState()
@@ -105,7 +101,8 @@ fun RecordingScreen(
         // 相机预览区域（动态宽高比，匹配实际的 ImageAnalysis 分辨率）
         Box(
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.75f)  // 限制宽度为屏幕的75%
+                .align(Alignment.CenterHorizontally)  // 水平居中
                 .aspectRatio(previewAspectRatio)
                 .background(Color.Black)
         ) {
@@ -193,46 +190,7 @@ fun RecordingScreen(
                 }
             }
             
-            // 提示词区域
-            Text(
-                text = "提示词",
-                style = MaterialTheme.typography.titleMedium
-            )
-            
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = { viewModel.updatePrompt(it) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 200.dp),
-                enabled = recordingState == RecordingState.IDLE,
-                maxLines = 10
-            )
-            
-            // 提示词操作按钮
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = { viewModel.resetPrompt() },
-                    modifier = Modifier.weight(1f),
-                    enabled = recordingState == RecordingState.IDLE
-                ) {
-                    Text("重置")
-                }
-                
-                OutlinedButton(
-                    onClick = {
-                        clipboardManager.setText(AnnotatedString(prompt))
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("复制")
-                }
-            }
-            
-            // 错误消息
+            // 错误消息（放在提示词上方）
             if (errorMessage != null) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -274,12 +232,12 @@ fun CameraPreview(
     val previewView = remember {
         PreviewView(context).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FIT_CENTER
+            scaleType = PreviewView.ScaleType.FILL_CENTER  // 填充容器，裁剪多余部分
         }
     }
     
-    // 绑定相机
-    LaunchedEffect(imageAnalysis) {
+    // 绑定相机（监听 imageAnalysis 的变化）
+    LaunchedEffect(imageAnalysis, analysisResolution) {
         try {
             val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
             val cameraProvider = cameraProviderFuture.get()
@@ -316,14 +274,14 @@ fun CameraPreview(
                     cameraSelector,
                     useCaseGroup
                 )
-                Log.d(TAG, "Camera bound with ViewPort + ImageAnalysis")
+                Log.d(TAG, "Camera bound with ViewPort(${width}x${height}) + ImageAnalysis")
             } else {
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     cameraSelector,
                     preview
                 )
-                Log.d(TAG, "Camera bound without ImageAnalysis")
+                Log.d(TAG, "Camera bound without ImageAnalysis (imageAnalysis=${imageAnalysis != null}, resolution=$analysisResolution)")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Camera binding failed", e)

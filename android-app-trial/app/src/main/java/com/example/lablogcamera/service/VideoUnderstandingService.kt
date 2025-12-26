@@ -259,11 +259,12 @@ class VideoUnderstandingService(
                     events = events,
                     appearances = appearances,
                     rawResponse = rawResponse,
-                    isStreaming = false
+                    isStreaming = false,
+                    parseError = null  // 解析成功
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to parse JSON", e)
-                // 解析失败，返回原始响应
+                // 解析失败，返回错误信息
                 UnderstandingResult(
                     id = id,
                     timestamp = timestamp,
@@ -271,11 +272,12 @@ class VideoUnderstandingService(
                     events = emptyList(),
                     appearances = emptyList(),
                     rawResponse = rawResponse,
-                    isStreaming = false
+                    isStreaming = false,
+                    parseError = "不符合预期的JSON格式"  // 友好的错误信息
                 )
             }
         } else {
-            // 未找到 JSON，返回原始响应
+            // 未找到 JSON，返回错误信息
             Log.w(TAG, "No JSON found in response")
             UnderstandingResult(
                 id = id,
@@ -284,7 +286,8 @@ class VideoUnderstandingService(
                 events = emptyList(),
                 appearances = emptyList(),
                 rawResponse = rawResponse,
-                isStreaming = false
+                isStreaming = false,
+                parseError = "响应中未找到JSON格式数据"
             )
         }
     }

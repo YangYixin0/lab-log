@@ -146,10 +146,11 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         val imageHeight = image.height
         val (targetWidth, targetHeight) = applyResolutionLimit(imageWidth, imageHeight, resolutionLimit)
         
-        // 首次获取分辨率时，更新给 UI（用于动态调整预览宽高比）
-        if (_analysisResolution.value == null) {
+        // 更新实际分辨率（如果与预期不同）
+        val currentResolution = _analysisResolution.value
+        if (currentResolution == null || currentResolution.first != targetWidth || currentResolution.second != targetHeight) {
             _analysisResolution.value = Pair(targetWidth, targetHeight)
-            Log.d(TAG, "ImageAnalysis resolution: ${targetWidth}x${targetHeight}")
+            Log.d(TAG, "ImageAnalysis actual resolution updated: ${targetWidth}x${targetHeight}")
         }
         
         // 计算裁剪区域
@@ -259,6 +260,12 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 
                 val analysis = analysisBuilder.build()
+                
+                // 预先设置预期的分辨率（以便 UI 能立即绑定相机）
+                // 实际分辨率会在第一帧到达后更新
+                withContext(Dispatchers.Main) {
+                    _analysisResolution.value = Pair(resolutionLimit, resolutionLimit)
+                }
                 
                 // 设置 Analyzer（在第一帧时获取实际分辨率并启动编码器）
                 analysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->

@@ -30,6 +30,7 @@ import com.example.lablogcamera.data.Event
 import com.example.lablogcamera.data.Appearance
 import com.example.lablogcamera.data.UnderstandingResult
 import com.example.lablogcamera.service.VideoUnderstandingService
+import com.example.lablogcamera.utils.ConfigManager
 import com.example.lablogcamera.viewmodel.DetailViewModel
 
 /**
@@ -72,7 +73,7 @@ fun DetailScreen(
                 },
                 actions = {
                     Text(
-                        text = "已理解 $usageCount 次",
+                        text = "已理解 $usageCount / ${ConfigManager.maxApiCalls} 次",
                         modifier = Modifier.padding(end = 16.dp)
                     )
                 },
@@ -128,13 +129,20 @@ fun DetailScreen(
                     )
                 }
                 
-                // 重新理解按钮
+                // 理解按钮（根据是否有理解结果显示不同文本）
+                val hasResults = recording!!.results.isNotEmpty()
                 Button(
                     onClick = { showReunderstandDialog = true },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !isUnderstanding && canUse
                 ) {
-                    Text(if (canUse) "重新理解" else "已达使用限制")
+                    Text(
+                        when {
+                            !canUse -> "已达使用限制"
+                            hasResults -> "再次理解"
+                            else -> "开始理解"
+                        }
+                    )
                 }
                 
                 // 错误消息
@@ -270,6 +278,7 @@ fun UnderstandingResultCard(
     clipboardManager: androidx.compose.ui.platform.ClipboardManager
 ) {
     var expanded by remember { mutableStateOf(true) }
+    var showJson by remember { mutableStateOf(true) }  // 默认显示 JSON
     
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -284,11 +293,17 @@ fun UnderstandingResultCard(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
-                IconButton(onClick = { expanded = !expanded }) {
-                    Icon(
-                        if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                        contentDescription = if (expanded) "折叠" else "展开"
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // JSON/表格切换按钮
+                    TextButton(onClick = { showJson = !showJson }) {
+                        Text(if (showJson) "查看表格" else "查看JSON")
+                    }
+                    IconButton(onClick = { expanded = !expanded }) {
+                        Icon(
+                            if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (expanded) "折叠" else "展开"
+                        )
+                    }
                 }
             }
             
@@ -296,25 +311,53 @@ fun UnderstandingResultCard(
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Divider()
                     
-                    // 事件表
-                    EventTable(
-                        events = result.events,
-                        onCopy = {
-                            val csv = CsvExporter.eventsToCSV(result.events)
-                            clipboardManager.setText(AnnotatedString(csv))
+                    // 如果有解析错误，显示错误信息
+                    if (result.parseError != null) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer
+                            )
+                        ) {
+                            Text(
+                                text = "⚠️ ${result.parseError}",
+                                modifier = Modifier.padding(16.dp),
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
-                    )
+                    }
                     
-                    // 人物外貌表
-                    AppearanceTable(
-                        appearances = result.appearances,
-                        onCopy = {
-                            val csv = CsvExporter.appearancesToCSV(result.appearances)
-                            clipboardManager.setText(AnnotatedString(csv))
-                        }
-                    )
+                    if (showJson) {
+                        // JSON 原文显示
+                        JsonSection(
+                            json = result.rawResponse,
+                            onCopy = {
+                                clipboardManager.setText(AnnotatedString(result.rawResponse))
+                            }
+                        )
+                    } else {
+                        // 事件表
+                        EventTable(
+                            events = result.events,
+                            onCopy = {
+                                val csv = CsvExporter.eventsToCSV(result.events)
+                                clipboardManager.setText(AnnotatedString(csv))
+                            }
+                        )
+                        
+                        // 人物外貌表
+                        AppearanceTable(
+                            appearances = result.appearances,
+                            onCopy = {
+                                val csv = CsvExporter.appearancesToCSV(result.appearances)
+                                clipboardManager.setText(AnnotatedString(csv))
+                            }
+                        )
+                    }
                     
-                    // 提示词
+                    // 提示词（始终显示）
                     PromptSection(
                         prompt = result.prompt,
                         onCopy = {
@@ -500,6 +543,52 @@ fun StreamingResultCard(streamingText: String) {
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+        }
+    }
+}
+
+/**
+ * JSON 原文显示区域
+ */
+@Composable
+fun JsonSection(
+    json: String,
+    onCopy: () -> Unit
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "JSON 原文",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
+            TextButton(onClick = onCopy) {
+                Text("复制")
+            }
+        }
+        
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Text(
+                text = json.ifEmpty { "暂无数据" },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp)
+                    .verticalScroll(rememberScrollState()),
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = Int.MAX_VALUE
+            )
         }
     }
 }
