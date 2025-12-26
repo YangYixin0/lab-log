@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -49,10 +50,26 @@ fun RecordingScreen(
     val completedVideoId by viewModel.completedVideoId.collectAsState()
     val analysisResolution by viewModel.analysisResolution.collectAsState()
     
-    // 计算预览宽高比（基于实际的 ImageAnalysis 分辨率）
-    val previewAspectRatio = analysisResolution?.let { (width, height) ->
-        width.toFloat() / height.toFloat()
-    } ?: 1f  // 默认 1:1
+    // 显示旋转状态（由 CameraPreview 更新）
+    var displayRotation by remember { mutableStateOf(android.view.Surface.ROTATION_0) }
+    
+    // 标记是否需要在重置后自动开始录制
+    var shouldStartAfterReset by remember { mutableStateOf(false) }
+    
+    // 计算预览宽高比（基于实际的 ImageAnalysis 分辨率和显示方向）
+    // 注意：预览容器的宽高比应该基于显示旋转，而不是设备物理方向
+    // 传感器输出通常是横向的（960x720），当显示旋转为90/270度时，需要交换宽高比
+    val previewAspectRatio = remember(analysisResolution, displayRotation) {
+        analysisResolution?.let { (width, height) ->
+            // 如果显示旋转是90或270度，预览容器需要交换宽高比
+            // 因为传感器输出是横向的（960x720），但显示时需要竖向（720x960）
+            if (displayRotation == android.view.Surface.ROTATION_90 || displayRotation == android.view.Surface.ROTATION_270) {
+                height.toFloat() / width.toFloat()
+            } else {
+                width.toFloat() / height.toFloat()
+            }
+        } ?: 1f  // 默认 1:1
+    }
     
     // 监听设备物理方向变化
     DisposableEffect(context) {
@@ -93,6 +110,14 @@ fun RecordingScreen(
         }
     }
     
+    // 监听状态变化：当从 COMPLETED 变为 IDLE 且需要自动开始时，自动开始录制
+    LaunchedEffect(recordingState, shouldStartAfterReset) {
+        if (recordingState == RecordingState.IDLE && shouldStartAfterReset) {
+            shouldStartAfterReset = false
+            viewModel.startRecording()
+        }
+    }
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -110,7 +135,8 @@ fun RecordingScreen(
             CameraPreview(
                 viewModel = viewModel,
                 lifecycleOwner = lifecycleOwner,
-                analysisResolution = analysisResolution
+                analysisResolution = analysisResolution,
+                onDisplayRotationChanged = { rotation -> displayRotation = rotation }
             )
             
             // 录制状态显示
@@ -182,10 +208,13 @@ fun RecordingScreen(
                 }
                 RecordingState.COMPLETED -> {
                     Button(
-                        onClick = { viewModel.resetRecording() },
+                        onClick = { 
+                            shouldStartAfterReset = true
+                            viewModel.resetRecording()
+                        },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("重新录制")
+                        Text("开始录制")
                     }
                 }
             }
@@ -224,7 +253,8 @@ fun RecordingScreen(
 fun CameraPreview(
     viewModel: RecordingViewModel,
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
-    analysisResolution: Pair<Int, Int>?
+    analysisResolution: Pair<Int, Int>?,
+    onDisplayRotationChanged: (Int) -> Unit
 ) {
     val context = LocalContext.current
     val imageAnalysis by viewModel.imageAnalysis
@@ -236,7 +266,13 @@ fun CameraPreview(
         }
     }
     
-    // 绑定相机（监听 imageAnalysis 的变化）
+    // 每次重组时检查显示旋转变化，并通知父组件
+    SideEffect {
+        val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
+        onDisplayRotationChanged(rotation)
+    }
+    
+    // 绑定相机（监听 imageAnalysis 和 analysisResolution 的变化）
     LaunchedEffect(imageAnalysis, analysisResolution) {
         try {
             val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
@@ -246,8 +282,22 @@ fun CameraPreview(
             // 固定使用后置摄像头
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             
+            // 当前显示方向（用于同步 Preview / ImageAnalysis / ViewPort）
+            val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
+            onDisplayRotationChanged(rotation)
+            
+            // 根据显示旋转和 ImageAnalysis 分辨率计算 ViewPort 宽高比
+            // 传感器输出通常是横向的（960x720），当显示旋转为90/270度时，需要交换宽高比
+            val (w, h) = analysisResolution ?: (960 to 720)
+            val rational = if (rotation == android.view.Surface.ROTATION_90 || rotation == android.view.Surface.ROTATION_270) {
+                Rational(h, w)  // 显示旋转90/270度时，交换宽高比
+            } else {
+                Rational(w, h)  // 显示旋转0/180度时，保持原始宽高比
+            }
+            
             // 创建预览
             val preview = Preview.Builder()
+                .setTargetRotation(rotation)
                 .build()
                 .also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
@@ -255,12 +305,14 @@ fun CameraPreview(
             
             // 如果 ImageAnalysis 存在，使用 ViewPort + UseCaseGroup 确保 FOV 一致
             if (imageAnalysis != null && analysisResolution != null) {
-                // 根据 ImageAnalysis 的实际分辨率创建动态 ViewPort
-                val (width, height) = analysisResolution
+                // 根据 ImageAnalysis 的实际分辨率和显示旋转创建动态 ViewPort
                 val viewPort = ViewPort.Builder(
-                    Rational(width, height),  // 使用实际分辨率的宽高比
-                    android.view.Surface.ROTATION_0
+                    rational,  // 使用根据显示旋转计算的一致宽高比
+                    rotation   // 使用当前显示旋转，避免 FOV 被裁剪
                 ).build()
+                
+                // 同步旋转给 ImageAnalysis
+                imageAnalysis?.targetRotation = rotation
                 
                 // 创建 UseCaseGroup，所有 UseCase 共享同一个 ViewPort
                 val useCaseGroup = UseCaseGroup.Builder()
@@ -274,7 +326,7 @@ fun CameraPreview(
                     cameraSelector,
                     useCaseGroup
                 )
-                Log.d(TAG, "Camera bound with ViewPort(${width}x${height}) + ImageAnalysis")
+                Log.d(TAG, "Camera bound with ViewPort(${w}x${h}, rotation=$rotation) + ImageAnalysis")
             } else {
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner,

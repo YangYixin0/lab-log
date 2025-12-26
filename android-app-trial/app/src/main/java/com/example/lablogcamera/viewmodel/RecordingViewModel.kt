@@ -77,6 +77,7 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
     
     // 设备物理方向（0=竖放, 90=右横, 180=倒置, 270=左横）
     private val _devicePhysicalRotation = MutableStateFlow(0)
+    val devicePhysicalRotation: StateFlow<Int> = _devicePhysicalRotation.asStateFlow()
     
     /**
      * 更新设备物理方向（从 UI 的 OrientationEventListener 调用）
@@ -141,28 +142,22 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
      */
     @SuppressLint("UnsafeOptInUsageError")
     private fun processFrame(image: ImageProxy, resolutionLimit: Int) {
-        // 应用分辨率上限
+        // 直接使用 ImageProxy 的完整尺寸，不进行裁剪
+        // 这样可以避免在不同 Android 版本上的 YUV buffer 访问问题
         val imageWidth = image.width
         val imageHeight = image.height
-        val (targetWidth, targetHeight) = applyResolutionLimit(imageWidth, imageHeight, resolutionLimit)
         
         // 更新实际分辨率（如果与预期不同）
         val currentResolution = _analysisResolution.value
-        if (currentResolution == null || currentResolution.first != targetWidth || currentResolution.second != targetHeight) {
-            _analysisResolution.value = Pair(targetWidth, targetHeight)
-            Log.d(TAG, "ImageAnalysis actual resolution updated: ${targetWidth}x${targetHeight}")
+        if (currentResolution == null || currentResolution.first != imageWidth || currentResolution.second != imageHeight) {
+            _analysisResolution.value = Pair(imageWidth, imageHeight)
+            Log.d(TAG, "ImageAnalysis actual resolution updated: ${imageWidth}x${imageHeight}")
         }
         
-        // 计算裁剪区域
-        val cropRect = if (targetWidth != imageWidth || targetHeight != imageHeight) {
-            // 需要裁剪，居中裁剪
-            val left = (imageWidth - targetWidth) / 2
-            val top = (imageHeight - targetHeight) / 2
-            Rect(left, top, left + targetWidth, top + targetHeight)
-        } else {
-            // 不需要裁剪
-            Rect(0, 0, imageWidth, imageHeight)
-        }
+        // 使用完整图像区域（不裁剪），宽高保持偶数以匹配 YUV420
+        val evenWidth = if (imageWidth % 2 == 0) imageWidth else imageWidth - 1
+        val evenHeight = if (imageHeight % 2 == 0) imageHeight else imageHeight - 1
+        val cropRect = Rect(0, 0, evenWidth, evenHeight)
         
         // 只在录制时处理帧
         if (_recordingState.value == RecordingState.RECORDING) {
@@ -176,8 +171,15 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
                     onVideoComplete = { _, _ -> }
                 )
                 
-                encoderWidth = targetWidth
-                encoderHeight = targetHeight
+                // 根据旋转角度决定编码尺寸（90/270 需要交换宽高）
+                val rotationForEncoding = calculateRotationForBackend(_devicePhysicalRotation.value)
+                if (rotationForEncoding == 90 || rotationForEncoding == 270) {
+                    encoderWidth = imageHeight
+                    encoderHeight = imageWidth
+                } else {
+                    encoderWidth = imageWidth
+                    encoderHeight = imageHeight
+                }
                 
                 videoEncoder?.start(encoderWidth, encoderHeight, bitrate, fps)
                 

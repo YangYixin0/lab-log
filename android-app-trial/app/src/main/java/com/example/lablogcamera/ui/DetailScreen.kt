@@ -234,12 +234,27 @@ fun DetailScreen(
                         
                         Spacer(modifier = Modifier.height(2.dp))  // 减少间距：4dp -> 2dp
                         
-                        // 提示词输入
-                        Text(
-                            text = "提示词:",
-                            style = MaterialTheme.typography.bodyMedium,  // 改小：bodyLarge -> bodyMedium
-                            fontWeight = FontWeight.Medium
-                        )
+                        // 提示词输入（带重置按钮）
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "提示词:",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            TextButton(
+                                onClick = { reunderstandPrompt = VideoUnderstandingService.DEFAULT_PROMPT },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text(
+                                    text = "重置",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
                         OutlinedTextField(
                             value = reunderstandPrompt,
                             onValueChange = { reunderstandPrompt = it },

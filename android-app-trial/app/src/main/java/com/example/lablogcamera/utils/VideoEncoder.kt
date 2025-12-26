@@ -46,6 +46,32 @@ class VideoEncoder(
     private var frameCount: Int = 0
     
     /**
+     * 尝试根据 outputFormat 启动 muxer（需要有 csd-0）
+     * 兼容老设备可能不触发 INFO_OUTPUT_FORMAT_CHANGED 的情况
+     */
+    private fun tryStartMuxerWithFormat(format: MediaFormat) {
+        if (isStarted) return
+        val muxer = mediaMuxer ?: return
+        
+        val csd0 = format.getByteBuffer("csd-0")
+        val csd1 = format.getByteBuffer("csd-1")
+        if (csd0 == null) {
+            Log.w(TAG, "Muxer start skipped: csd-0 is null, wait for INFO_OUTPUT_FORMAT_CHANGED")
+            return
+        }
+        
+        cachedSpsBuffer = csd0.duplicate()
+        cachedPpsBuffer = csd1?.duplicate()
+        
+        if (videoTrackIndex < 0) {
+            videoTrackIndex = muxer.addTrack(format)
+        }
+        muxer.start()
+        isStarted = true
+        Log.d(TAG, "Video track added via tryStartMuxer, index=$videoTrackIndex, isStarted=$isStarted")
+    }
+    
+    /**
      * 启动编码器
      * @param width 视频宽度
      * @param height 视频高度
@@ -87,17 +113,10 @@ class VideoEncoder(
             tempFile = File.createTempFile("recording_", ".mp4")
             mediaMuxer = MediaMuxer(tempFile!!.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             
-            // 某些编码器不会发送 INFO_OUTPUT_FORMAT_CHANGED，需要主动获取 outputFormat
+            // 尝试直接使用 outputFormat 启动 muxer；若失败则等待 INFO_OUTPUT_FORMAT_CHANGED
             try {
                 val outputFormat = codec.outputFormat
-                Log.d(TAG, "Got output format: $outputFormat")
-                
-                // 添加视频轨道并启动 Muxer
-                videoTrackIndex = mediaMuxer?.addTrack(outputFormat) ?: -1
-                mediaMuxer?.start()
-                isStarted = true
-                
-                Log.d(TAG, "Video track added at start, index=$videoTrackIndex, isStarted=$isStarted")
+                tryStartMuxerWithFormat(outputFormat)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to get output format at start, will wait for INFO_OUTPUT_FORMAT_CHANGED", e)
             }
@@ -154,12 +173,43 @@ class VideoEncoder(
                 nv12Bytes
             }
             
-            // 检查数据大小
+            // 检查数据大小（Android 8.1 兼容性）
             if (yuvBytes.size != expectedSize) {
-                Log.w(TAG, "YUV data size mismatch: expected=$expectedSize, actual=${yuvBytes.size}")
-                // 如果大小不匹配，填充或截断
+                Log.w(TAG, "YUV data size mismatch: expected=$expectedSize, actual=${yuvBytes.size}, ratio=${yuvBytes.size.toFloat()/expectedSize}")
+                
+                // 如果大小差异太大（<50%），可能是严重错误
+                if (yuvBytes.size < expectedSize * 0.5) {
+                    Log.e(TAG, "YUV data critically small (<50%), skipping frame")
+                    return
+                }
+                
+                // 调整数据大小（填充或截断）
                 val adjustedBytes = ByteArray(expectedSize)
                 System.arraycopy(yuvBytes, 0, adjustedBytes, 0, minOf(yuvBytes.size, expectedSize))
+                
+                // 如果数据不足，智能填充
+                if (yuvBytes.size < expectedSize) {
+                    val ySize = encoderWidth * encoderHeight
+                    val uvStart = ySize
+                    
+                    // 如果Y平面不完整，填充为16（黑色）
+                    if (yuvBytes.size < ySize) {
+                        Log.w(TAG, "Y plane incomplete, padding with black")
+                        for (i in yuvBytes.size until ySize) {
+                            adjustedBytes[i] = 16
+                        }
+                        // UV平面全部填充为128（中性色）
+                        for (i in uvStart until expectedSize) {
+                            adjustedBytes[i] = 128.toByte()
+                        }
+                    } else {
+                        // Y平面完整，只填充UV平面
+                        Log.w(TAG, "UV plane incomplete, padding with neutral color")
+                        for (i in yuvBytes.size until expectedSize) {
+                            adjustedBytes[i] = 128.toByte()
+                        }
+                    }
+                }
                 
                 val inputBufferIndex = codec.dequeueInputBuffer(10000)
                 if (inputBufferIndex >= 0) {
@@ -200,20 +250,7 @@ class VideoEncoder(
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         val format = codec.outputFormat
                         Log.d(TAG, "Output format changed: $format")
-                        val csd0 = format.getByteBuffer("csd-0")
-                        val csd1 = format.getByteBuffer("csd-1")
-                        if (csd0 != null) {
-                            cachedSpsBuffer = csd0.duplicate()
-                            cachedPpsBuffer = csd1?.duplicate()
-                            
-                            // 添加视频轨道
-                            if (videoTrackIndex < 0) {
-                                videoTrackIndex = mediaMuxer?.addTrack(format) ?: -1
-                                mediaMuxer?.start()
-                                isStarted = true
-                                Log.d(TAG, "Video track added, index=$videoTrackIndex, isStarted=$isStarted")
-                            }
-                        }
+                        tryStartMuxerWithFormat(format)
                         outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 10000)
                         continue
                     }
@@ -231,10 +268,42 @@ class VideoEncoder(
                         val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
                         if (outputBuffer != null && bufferInfo.size > 0) {
                             val isKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                            val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                             
                             if (!isFirstKeyframeReceived && isKeyframe) {
                                 isFirstKeyframeReceived = true
                                 Log.d(TAG, "First keyframe received")
+                            }
+                            
+                            // 兜底：如果 muxer 还没启动，尝试使用当前 format 或 codec-config buffer 启动
+                            if (!isStarted) {
+                                tryStartMuxerWithFormat(codec.outputFormat)
+                                
+                                if (!isStarted && isConfig) {
+                                    try {
+                                        // 部分设备将 SPS/PPS 放在 codec-config buffer 中
+                                        outputBuffer.position(bufferInfo.offset)
+                                        outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                                        val csdBuf = ByteBuffer.allocate(bufferInfo.size)
+                                        csdBuf.put(outputBuffer)
+                                        csdBuf.flip()
+                                        
+                                        val fallbackFormat = codec.outputFormat
+                                        fallbackFormat.setByteBuffer("csd-0", csdBuf)
+                                        tryStartMuxerWithFormat(fallbackFormat)
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "Failed to start muxer from codec-config buffer", e)
+                                    }
+                                }
+                                
+                                // 仍未启动且拿到关键帧时，强制使用当前 outputFormat 启动（无 csd 也启动，避免全程丢帧）
+                                if (!isStarted && isKeyframe) {
+                                    try {
+                                        tryStartMuxerWithFormat(codec.outputFormat)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Forced muxer start failed", e)
+                                    }
+                                }
                             }
                             
                             // 写入 MP4
@@ -313,10 +382,18 @@ class VideoEncoder(
                     mediaMuxer?.stop()
                     Log.d(TAG, "Muxer stopped")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to stop muxer", e)
+                    Log.e(TAG, "Failed to stop muxer (this may happen on older Android versions): ${e.message}", e)
+                    // 在旧版本Android上，如果缺少codec specific data，stop()会失败
+                    // 这种情况下，直接release可能会生成不完整但可播放的文件
                 }
             }
-            mediaMuxer?.release()
+            
+            try {
+                mediaMuxer?.release()
+                Log.d(TAG, "Muxer released")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to release muxer", e)
+            }
             mediaMuxer = null
             
             // 4. 停止编码器
@@ -451,14 +528,37 @@ fun ImageProxy.toNv12ByteArray(
         val chromaHeight = cropHeight / 2
         
         var uvDstIndex = ySize
-        for (row in 0 until chromaHeight) {
-            val uRowStart = (row + chromaTop) * uRowStride
-            val vRowStart = (row + chromaTop) * vRowStride
-            for (col in 0 until chromaWidth) {
-                val uIndex = uRowStart + (col + chromaLeft) * uPixelStride
-                val vIndex = vRowStart + (col + chromaLeft) * vPixelStride
-                nv12[uvDstIndex++] = uBuffer.get(uIndex)
-                nv12[uvDstIndex++] = vBuffer.get(vIndex)
+        val uBufferSize = uBuffer.capacity()
+        val vBufferSize = vBuffer.capacity()
+        
+        try {
+            for (row in 0 until chromaHeight) {
+                val uRowStart = (row + chromaTop) * uRowStride
+                val vRowStart = (row + chromaTop) * vRowStride
+                for (col in 0 until chromaWidth) {
+                    val uIndex = uRowStart + (col + chromaLeft) * uPixelStride
+                    val vIndex = vRowStart + (col + chromaLeft) * vPixelStride
+                    
+                    // 边界检查（兼容Android 8.1）
+                    if (uIndex >= 0 && uIndex < uBufferSize && 
+                        vIndex >= 0 && vIndex < vBufferSize && 
+                        uvDstIndex < nv12.size - 1) {
+                        nv12[uvDstIndex++] = uBuffer.get(uIndex)
+                        nv12[uvDstIndex++] = vBuffer.get(vIndex)
+                    } else {
+                        // 超出范围，填充中性色
+                        if (uvDstIndex < nv12.size - 1) {
+                            nv12[uvDstIndex++] = 128.toByte()
+                            nv12[uvDstIndex++] = 128.toByte()
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // 如果UV提取失败，填充剩余部分为中性色
+            Log.w("VideoEncoder", "UV extraction failed, filling with neutral color", e)
+            while (uvDstIndex < nv12.size) {
+                nv12[uvDstIndex++] = 128.toByte()
             }
         }
         
@@ -477,17 +577,12 @@ fun ImageProxy.toNv12ByteArray(
         else -> Pair(imageWidth, imageHeight)
     }
     
-    val safeRect = cropRect.ensureEvenBounds(rotatedWidth, rotatedHeight)
-    val cropWidth = safeRect.width()
-    val cropHeight = safeRect.height()
+    // 旋转时，为避免尺寸对齐导致的数据截断，直接使用旋转后的完整尺寸
+    val alignedCropWidth = if (rotatedWidth % 2 == 0) rotatedWidth else rotatedWidth - 1
+    val alignedCropHeight = if (rotatedHeight % 2 == 0) rotatedHeight else rotatedHeight - 1
     
-    val alignedCropWidth = ((cropWidth / 32) * 32).let { if (it % 2 != 0) it - 1 else it }.coerceAtLeast(2)
-    val alignedCropHeight = ((cropHeight / 32) * 32).let { if (it % 2 != 0) it - 1 else it }.coerceAtLeast(2)
-    
-    val originalCenterX = safeRect.left + cropWidth / 2
-    val originalCenterY = safeRect.top + cropHeight / 2
-    val cropLeft = (originalCenterX - alignedCropWidth / 2).coerceIn(0, rotatedWidth - alignedCropWidth)
-    val cropTop = (originalCenterY - alignedCropHeight / 2).coerceIn(0, rotatedHeight - alignedCropHeight)
+    val cropLeft = 0
+    val cropTop = 0
     
     val ySize = alignedCropWidth * alignedCropHeight
     val uvSize = ySize / 2
@@ -510,50 +605,79 @@ fun ImageProxy.toNv12ByteArray(
     val rotatedUVSize = rotatedYSize / 2
     val rotatedUV = ByteArray(rotatedUVSize)
     
-    // 旋转 Y 平面
+    // 旋转 Y 平面（添加边界检查）
+    val yBufferSize = yBuffer.capacity()
     for (y in 0 until imageHeight) {
         for (x in 0 until imageWidth) {
             val srcIndex = y * yRowStride + x
-            val srcY = yBuffer.get(srcIndex)
-            
-            val (dstX, dstY) = when (rotationDegrees) {
-                90 -> Pair(imageHeight - 1 - y, x)
-                180 -> Pair(imageWidth - 1 - x, imageHeight - 1 - y)
-                270 -> Pair(y, imageWidth - 1 - x)
-                else -> Pair(x, y)
-            }
-            
-            if (dstX in 0 until rotatedWidth && dstY in 0 until rotatedHeight) {
-                val dstIndex = dstY * rotatedWidth + dstX
-                rotatedY[dstIndex] = srcY
+            if (srcIndex >= 0 && srcIndex < yBufferSize) {
+                val srcY = yBuffer.get(srcIndex)
+                
+                val (dstX, dstY) = when (rotationDegrees) {
+                    90 -> Pair(imageHeight - 1 - y, x)
+                    180 -> Pair(imageWidth - 1 - x, imageHeight - 1 - y)
+                    270 -> Pair(y, imageWidth - 1 - x)
+                    else -> Pair(x, y)
+                }
+                
+                if (dstX in 0 until rotatedWidth && dstY in 0 until rotatedHeight) {
+                    val dstIndex = dstY * rotatedWidth + dstX
+                    if (dstIndex >= 0 && dstIndex < rotatedY.size) {
+                        rotatedY[dstIndex] = srcY
+                    }
+                }
             }
         }
     }
     
-    // 旋转 UV 平面
+    // 旋转 UV 平面（添加边界检查）
     val chromaWidth = imageWidth / 2
     val chromaHeight = imageHeight / 2
     val rotatedChromaWidth = rotatedWidth / 2
     val rotatedChromaHeight = rotatedHeight / 2
+    val uBufferSize = uBuffer.capacity()
+    val vBufferSize = vBuffer.capacity()
     
     for (cy in 0 until chromaHeight) {
         for (cx in 0 until chromaWidth) {
             val uIndex = cy * uRowStride + cx * uPixelStride
             val vIndex = cy * vRowStride + cx * vPixelStride
-            val u = uBuffer.get(uIndex)
-            val v = vBuffer.get(vIndex)
             
-            val (dstCX, dstCY) = when (rotationDegrees) {
-                90 -> Pair(chromaHeight - 1 - cy, cx)
-                180 -> Pair(chromaWidth - 1 - cx, chromaHeight - 1 - cy)
-                270 -> Pair(cy, chromaWidth - 1 - cx)
-                else -> Pair(cx, cy)
-            }
-            
-            if (dstCX in 0 until rotatedChromaWidth && dstCY in 0 until rotatedChromaHeight) {
-                val dstUVIndex = dstCY * rotatedChromaWidth + dstCX
-                rotatedUV[dstUVIndex * 2] = u
-                rotatedUV[dstUVIndex * 2 + 1] = v
+            if (uIndex >= 0 && uIndex < uBufferSize && 
+                vIndex >= 0 && vIndex < vBufferSize) {
+                val u = uBuffer.get(uIndex)
+                val v = vBuffer.get(vIndex)
+                
+                val (dstCX, dstCY) = when (rotationDegrees) {
+                    90 -> Pair(chromaHeight - 1 - cy, cx)
+                    180 -> Pair(chromaWidth - 1 - cx, chromaHeight - 1 - cy)
+                    270 -> Pair(cy, chromaWidth - 1 - cx)
+                    else -> Pair(cx, cy)
+                }
+                
+                if (dstCX in 0 until rotatedChromaWidth && dstCY in 0 until rotatedChromaHeight) {
+                    val dstUVIndex = dstCY * rotatedChromaWidth + dstCX
+                    if (dstUVIndex * 2 + 1 < rotatedUV.size) {
+                        rotatedUV[dstUVIndex * 2] = u
+                        rotatedUV[dstUVIndex * 2 + 1] = v
+                    }
+                }
+            } else {
+                // 如果UV数据超出边界，使用中性色填充对应位置
+                val (dstCX, dstCY) = when (rotationDegrees) {
+                    90 -> Pair(chromaHeight - 1 - cy, cx)
+                    180 -> Pair(chromaWidth - 1 - cx, chromaHeight - 1 - cy)
+                    270 -> Pair(cy, chromaWidth - 1 - cx)
+                    else -> Pair(cx, cy)
+                }
+                
+                if (dstCX in 0 until rotatedChromaWidth && dstCY in 0 until rotatedChromaHeight) {
+                    val dstUVIndex = dstCY * rotatedChromaWidth + dstCX
+                    if (dstUVIndex * 2 + 1 < rotatedUV.size) {
+                        rotatedUV[dstUVIndex * 2] = 128.toByte()
+                        rotatedUV[dstUVIndex * 2 + 1] = 128.toByte()
+                    }
+                }
             }
         }
     }
