@@ -112,6 +112,38 @@ class SeekDBClient:
             self.connection.rollback()
             raise RuntimeError(f"插入字段加密密钥失败: {e}")
     
+    def insert_appearance_record(
+        self, 
+        person_id: str, 
+        encrypted_user_id: Optional[str], 
+        encrypted_appearance: Optional[str]
+    ) -> None:
+        """
+        插入人物外貌记录
+        
+        Args:
+            person_id: 人物编号，如 p1, p2
+            encrypted_user_id: 加密后的用户ID（Base64编码，包含nonce+ciphertext），可为 None
+            encrypted_appearance: 加密后的外貌描述（Base64编码，包含nonce+ciphertext），可为 None
+        """
+        self._ensure_connected()
+        
+        sql = """
+            INSERT INTO person_appearances (person_id, encrypted_user_id, encrypted_appearance)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                encrypted_user_id = VALUES(encrypted_user_id),
+                encrypted_appearance = VALUES(encrypted_appearance)
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, (person_id, encrypted_user_id, encrypted_appearance))
+            self.connection.commit()
+        except Exception as e:
+            self.connection.rollback()
+            raise RuntimeError(f"插入人物外貌记录失败: {e}")
+    
     def get_field_encryption_key(self, event_id: str, field_path: str,
                                  user_id: str) -> Optional[str]:
         """获取字段加密密钥（DEK）"""
@@ -413,7 +445,7 @@ class SeekDBClient:
         self._ensure_connected()
         
         # 验证表名（防止 SQL 注入）
-        allowed_tables = ['users', 'logs_raw', 'logs_embedding', 'tickets', 'field_encryption_keys']
+        allowed_tables = ['users', 'logs_raw', 'logs_embedding', 'tickets', 'field_encryption_keys', 'person_appearances']
         if table_name not in allowed_tables:
             raise ValueError(f"不允许访问表: {table_name}")
         

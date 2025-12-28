@@ -77,3 +77,12 @@ CREATE TABLE IF NOT EXISTS tickets (
     INDEX idx_requester (requester_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ==================== 人物外貌表 ====================
+CREATE TABLE IF NOT EXISTS person_appearances (
+    person_id VARCHAR(64) PRIMARY KEY COMMENT '人物编号，如 p1, p2',
+    encrypted_user_id TEXT COMMENT '加密后的用户ID（Base64编码，包含nonce+ciphertext）',
+    encrypted_appearance TEXT COMMENT '加密后的外貌描述（Base64编码，包含nonce+ciphertext）',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+

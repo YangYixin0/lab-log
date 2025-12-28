@@ -15,9 +15,10 @@
 
 import sys
 import argparse
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
@@ -25,6 +26,7 @@ sys.path.insert(0, str(project_root))
 
 from context.appearance_cache import AppearanceCache
 from storage.seekdb_client import SeekDBClient
+from log_writer.encryption_service import FieldEncryptionService
 
 
 def load_appearance_cache(date: datetime) -> AppearanceCache:
@@ -137,7 +139,7 @@ def encrypt_and_save_appearances(
     dry_run: bool = False
 ) -> int:
     """
-    加密 user_id 并写入数据库
+    加密 user_id 和 appearance 并写入数据库
     
     Args:
         cache: 外貌缓存
@@ -147,13 +149,19 @@ def encrypt_and_save_appearances(
     Returns:
         保存的记录数量
     """
-    # TODO: 实现实际的加密和入库逻辑
-    # 1. 遍历所有主记录
-    # 2. 对 user_id 进行加密
-    # 3. 写入数据库（需要新建表或使用现有表）
-    
     print(f"[入库] {'预览模式 - ' if dry_run else ''}加密外貌记录并写入数据库...")
     
+    # 获取 admin 用户的公钥
+    try:
+        admin_public_key = db_client.get_user_public_key('admin')
+    except Exception as e:
+        print(f"[错误] 获取 admin 用户公钥失败: {e}")
+        return 0
+    
+    # 初始化加密服务
+    encryption_service = FieldEncryptionService()
+    
+    # 获取主记录
     main_records, aliases = cache.get_for_prompt()
     
     saved_count = 0
@@ -162,16 +170,74 @@ def encrypt_and_save_appearances(
         appearance = record['appearance']
         user_id = record.get('user_id')
         
-        # 示例：加密和入库逻辑（需要根据实际需求实现）
-        # if user_id and not dry_run:
-        #     encrypted_user_id = encrypt(user_id)
-        #     db_client.insert_appearance_record(person_id, appearance, encrypted_user_id)
+        # 使用特殊的 event_id 格式
+        appearance_event_id = f"appearance_{person_id}"
         
-        saved_count += 1
-        if user_id:
-            print(f"  {person_id}: 外貌长度={len(appearance)}, 用户ID={user_id[:8]}...")
+        encrypted_user_id: Optional[str] = None
+        encrypted_appearance: Optional[str] = None
+        
+        if not dry_run:
+            try:
+                # 加密 appearance（所有记录都需要）
+                encrypted_appearance, encrypted_dek_appearance = encryption_service.encrypt_field_value(
+                    event_id=appearance_event_id,
+                    field_path="appearance",
+                    value=appearance,
+                    user_id='admin',
+                    public_key_pem=admin_public_key
+                )
+                
+                # 保存 appearance 的加密密钥
+                db_client.insert_field_encryption_key(
+                    event_id=appearance_event_id,
+                    field_path="appearance",
+                    user_id='admin',
+                    encrypted_dek=encrypted_dek_appearance
+                )
+                
+                # 如果有 user_id，也加密它
+                if user_id:
+                    encrypted_user_id, encrypted_dek_user_id = encryption_service.encrypt_field_value(
+                        event_id=appearance_event_id,
+                        field_path="user_id",
+                        value=user_id,
+                        user_id='admin',
+                        public_key_pem=admin_public_key
+                    )
+                    
+                    # 保存 user_id 的加密密钥
+                    db_client.insert_field_encryption_key(
+                        event_id=appearance_event_id,
+                        field_path="user_id",
+                        user_id='admin',
+                        encrypted_dek=encrypted_dek_user_id
+                    )
+                
+                # 插入外貌记录
+                db_client.insert_appearance_record(
+                    person_id=person_id,
+                    encrypted_user_id=encrypted_user_id,
+                    encrypted_appearance=encrypted_appearance
+                )
+                
+                saved_count += 1
+                if user_id:
+                    print(f"  {person_id}: 外貌已加密（长度={len(appearance)}），用户ID已加密（{user_id[:8]}...）")
+                else:
+                    print(f"  {person_id}: 外貌已加密（长度={len(appearance)}），无用户ID")
+                    
+            except Exception as e:
+                print(f"  [错误] 处理 {person_id} 失败: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
         else:
-            print(f"  {person_id}: 外貌长度={len(appearance)}, 无用户ID")
+            # 预览模式
+            saved_count += 1
+            if user_id:
+                print(f"  {person_id}: 将加密外貌（长度={len(appearance)}）和用户ID（{user_id[:8]}...）")
+            else:
+                print(f"  {person_id}: 将加密外貌（长度={len(appearance)}），无用户ID")
     
     print(f"[入库] 完成，{'将' if dry_run else '已'}保存 {saved_count} 条记录")
     return saved_count
@@ -191,11 +257,41 @@ def trigger_indexing(date: datetime, dry_run: bool = False) -> None:
         print("[索引] 预览模式，跳过实际索引")
         return
     
-    # TODO: 调用 index_events.py 或直接执行索引逻辑
-    # import subprocess
-    # subprocess.run([sys.executable, "scripts/index_events.py"])
+    # 调用 index_events.py 脚本
+    script_path = project_root / "scripts" / "index_events.py"
     
-    print("[索引] 索引触发完成")
+    if not script_path.exists():
+        print(f"[错误] 索引脚本不存在: {script_path}")
+        return
+    
+    try:
+        print("[索引] 开始执行索引脚本...")
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=3600  # 1小时超时
+        )
+        
+        if result.returncode == 0:
+            print("[索引] 索引脚本执行成功")
+            if result.stdout:
+                # 打印最后几行输出
+                lines = result.stdout.strip().split('\n')
+                for line in lines[-5:]:
+                    if line.strip():
+                        print(f"  {line}")
+        else:
+            print(f"[错误] 索引脚本执行失败（返回码: {result.returncode}）")
+            if result.stderr:
+                print(f"  错误信息: {result.stderr[:500]}")
+    except subprocess.TimeoutExpired:
+        print("[错误] 索引脚本执行超时（超过1小时）")
+    except Exception as e:
+        print(f"[错误] 执行索引脚本失败: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def main():
