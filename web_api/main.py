@@ -7,7 +7,8 @@ from web_api.routers import auth, users, admin
 app = FastAPI(
     title="Lab Log API",
     description="实验室日志系统 API",
-    version="1.0.0"
+    version="1.0.0",
+    root_path="/api"
 )
 
 # 配置 CORS
