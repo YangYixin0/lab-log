@@ -31,7 +31,7 @@ def get_tables(
     try:
         tables = db.get_table_names()
         # 过滤掉系统表
-        allowed_tables = ['users', 'logs_raw', 'logs_embedding', 'tickets', 'field_encryption_keys']
+        allowed_tables = ['users', 'logs_raw', 'logs_embedding', 'tickets', 'field_encryption_keys', 'person_appearances']
         tables = [t for t in tables if t in allowed_tables]
         return TableListResponse(tables=tables)
     except Exception as e:

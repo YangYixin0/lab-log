@@ -85,6 +85,9 @@ class RecordingSession:
         self.session_dir = RECORDINGS_ROOT / timestamp
         self.session_dir.mkdir(parents=True, exist_ok=True)
         
+        # 提取名义日期 (YYYY-MM-DD)
+        self.nominal_date = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+        
         # 实时处理相关
         self.enable_realtime_processing = enable_realtime_processing and REALTIME_PROCESSING_ENABLED
         
@@ -111,7 +114,7 @@ class RecordingSession:
         self.segment_count = 0
         
         # 外貌缓存文件路径
-        self.appearance_cache_path = DEBUG_LOG_DIR / "appearances_today.json"
+        self.appearance_cache_path = DEBUG_LOG_DIR / "appearances.json"
     
     def init_dynamic_context(self):
         """初始化动态上下文组件"""
@@ -124,6 +127,7 @@ class RecordingSession:
             
             # 创建人物外貌缓存（尝试从文件加载）
             self.appearance_cache = AppearanceCache()
+            self.appearance_cache.nominal_date = self.nominal_date
             if self.appearance_cache_path.exists():
                 loaded = self.appearance_cache.load_from_file(str(self.appearance_cache_path))
                 if loaded:

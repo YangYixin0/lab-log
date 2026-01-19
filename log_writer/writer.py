@@ -106,8 +106,12 @@ class LogWriter:
                         
                         self._set_nested_value(structured, field_path, encrypted_value)
                         
+                        # 提取事件发生的日期
+                        event_date = event_log.start_time.strftime('%Y-%m-%d')
+                        
                         self.db.insert_field_encryption_key(
-                            event_id=event_log.event_id,
+                            ref_id=event_log.event_id,
+                            ref_date=event_date,
                             field_path=field_path,
                             user_id=user_id,
                             encrypted_dek=encrypted_dek

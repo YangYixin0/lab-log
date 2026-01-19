@@ -39,14 +39,15 @@ CREATE TABLE IF NOT EXISTS logs_raw (
 -- 每个需要加密的字段，对每个有权限的用户，存储一份用该用户公钥加密的 DEK
 CREATE TABLE IF NOT EXISTS field_encryption_keys (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    event_id VARCHAR(64) NOT NULL,
-    field_path VARCHAR(255) NOT NULL COMMENT 'JSON 路径，例如 person.clothing_color',
-    user_id VARCHAR(64) NOT NULL COMMENT '这个 DEK 对应的用户',
+    ref_id VARCHAR(64) NOT NULL COMMENT '关联 ID（event_id 或 person_id）',
+    ref_date DATE NOT NULL DEFAULT '1970-01-01' COMMENT '关联日期（对于外貌记录为名义日期，对于事件日志通常为 1970-01-01 或事件日期）',
+    field_path VARCHAR(255) NOT NULL COMMENT 'JSON 路径，例如 person.clothing_color 或 appearance',
+    user_id VARCHAR(64) COMMENT '这个 DEK 对应的用户（允许为空，例如为外貌记录加密时）',
     encrypted_dek TEXT NOT NULL COMMENT '用用户 RSA 公钥加密的 DEK（Base64 编码）',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_event_field_user (event_id, field_path, user_id),
+    UNIQUE KEY uk_ref_field_user (ref_id, ref_date, field_path, user_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-    INDEX idx_event (event_id),
+    INDEX idx_ref (ref_id, ref_date),
     INDEX idx_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -75,5 +76,17 @@ CREATE TABLE IF NOT EXISTS tickets (
     FOREIGN KEY (requester_id) REFERENCES users(user_id),
     INDEX idx_status (status),
     INDEX idx_requester (requester_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ==================== 人物外貌表 ====================
+CREATE TABLE IF NOT EXISTS person_appearances (
+    person_id VARCHAR(64) NOT NULL COMMENT '人物编号，如 p1, p2',
+    date DATE NOT NULL COMMENT '名义日期',
+    user_id TEXT COMMENT '用户ID（可能是加密后的 Base64 字符串，也可能是明文）',
+    appearance TEXT COMMENT '外貌描述（可能是加密后的 Base64 字符串，也可能是明文）',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (person_id, date),
+    INDEX idx_date (date),
+    INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

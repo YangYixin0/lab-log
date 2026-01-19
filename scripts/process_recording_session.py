@@ -89,6 +89,31 @@ def main():
         print(f"错误: 会话目录不存在: {session_path}")
         sys.exit(1)
 
+    # 从会话目录提取名义日期 (格式: YYYYMMDD_HHMMSS)
+    session_name = session_path.name
+    try:
+        # 提取前8位 YYYYMMDD
+        date_part = session_name.split('_')[0]
+        if len(date_part) != 8 or not date_part.isdigit():
+            raise ValueError(f"目录名日期部分无效: {date_part}")
+        nominal_date = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:]}"
+        print(f"[Context]: 提取到名义日期: {nominal_date}")
+    except Exception as e:
+        print(f"错误: 无法从目录名 {session_name} 提取日期。格式应为 YYYYMMDD_HHMMSS。详细错误: {e}")
+        sys.exit(1)
+
+    # 询问是否清空测试数据
+    clear_confirm = input("是否在处理前清空现有测试数据 (appearances.json, event_logs.jsonl 等)? (y/N): ")
+    if clear_confirm.lower() == 'y':
+        print("[System]: 正在执行 scripts/clear_test_data.py...")
+        import subprocess
+        try:
+            subprocess.run([sys.executable, str(project_root / "scripts" / "clear_test_data.py")], check=True)
+            print("[System]: 测试数据已清空")
+        except Exception as e:
+            print(f"[Error]: 清空测试数据失败: {e}")
+            sys.exit(1)
+
     segments = load_segments(session_path, args.target_duration)
     if not segments:
         print(f"错误: 目录中未找到 mp4 分段: {session_path}")
@@ -110,7 +135,8 @@ def main():
             
             # 创建人物外貌缓存（尝试从文件加载）
             appearance_cache = AppearanceCache()
-            appearance_cache_path = DEBUG_LOG_DIR / "appearances_today.json"
+            appearance_cache.nominal_date = nominal_date
+            appearance_cache_path = DEBUG_LOG_DIR / "appearances.json"
             if appearance_cache_path.exists():
                 loaded = appearance_cache.load_from_file(str(appearance_cache_path))
                 if loaded:
@@ -203,7 +229,7 @@ def main():
                 
                 # 周期性保存外貌缓存
                 if DYNAMIC_CONTEXT_ENABLED and appearance_cache and processed_count % APPEARANCE_DUMP_INTERVAL == 0:
-                    appearance_cache_path = DEBUG_LOG_DIR / "appearances_today.json"
+                    appearance_cache_path = DEBUG_LOG_DIR / "appearances.json"
                     try:
                         appearance_cache.dump_to_file(str(appearance_cache_path))
                         print(f"[Context]: 外貌缓存已保存，共 {appearance_cache.get_record_count()} 条记录")
@@ -218,7 +244,7 @@ def main():
         
         # 最终保存外貌缓存
         if DYNAMIC_CONTEXT_ENABLED and appearance_cache:
-            appearance_cache_path = DEBUG_LOG_DIR / "appearances_today.json"
+            appearance_cache_path = DEBUG_LOG_DIR / "appearances.json"
             try:
                 appearance_cache.dump_to_file(str(appearance_cache_path))
                 print(f"[Context]: 最终保存外貌缓存，共 {appearance_cache.get_record_count()} 条记录")
