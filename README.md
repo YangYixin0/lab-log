@@ -1002,7 +1002,9 @@ python streaming_server/test_qr_server.py
     - **隐私保护**：日终处理（`end_of_day.py`）会将外貌数据使用用户公钥加密。如果用户存在但未上传公钥，系统将报错并中止处理，以确保安全。
     - **清理建议**：使用 `scripts/clear_test_data.py` 时，可以分阶段选择清空视频理解原始数据或日终处理后的加密数据。
 
-11. **画面条纹问题解决经验**：
+11. **API 路由稳健性**：后端 API 采用统一的前缀管理（在 `web_api/main.py` 中注册路由时统一注入 `/api`），避免了子路由内部硬编码路径导致的维护困难和 Nginx 代理映射错误。
+
+12. **画面条纹问题解决经验**：
     - **问题现象**：竖屏采集时视频画面出现绿色/紫色条纹
     - **根本原因**：编码器输入色彩格式不匹配。某些设备（如 Pixel 6a）的硬件编码器实际使用 `COLOR_FormatYUV420Planar`（I420，分离 U/V 平面），而代码一直提供 NV12（半平面，交错 UV），导致 UV 平面错位
     - **解决方案**：
@@ -1013,11 +1015,11 @@ python streaming_server/test_qr_server.py
     - **关键代码**：`H264Encoder.encode()` 中根据 `encoderColorFormat` 动态选择 NV12 或 I420 格式
     - **额外收益**：使用真实帧时间戳后，视频 FPS 反映实际捕获速率（可能为非整数），播放速度与现实时间完美对齐
 
-12. **16KB 页面大小兼容性**：
+13. **16KB 页面大小兼容性**：
     - Android 15+ 要求所有原生库（.so 文件）对齐到 16KB 页面大小
     - ML Kit 17.3.0+ 已支持 16KB 对齐，使用该版本可避免兼容性警告
     - 在 `build.gradle.kts` 中设置 `packaging.jniLibs.useLegacyPackaging = false` 确保正确打包
-13. **WebSocket 分段过大导致客户端自停**：
+14. **WebSocket 分段过大导致客户端自停**：
     - 现象：60s 分段在 1920x1920 @4fps，2MB 码率下单段约 12.8MB，Base64 后约 16.3MB，超过 OkHttp 客户端 WebSocket 发送队列硬上限（16MB），`send()` 返回 false，App 发送 error/capture_stopped 后断开
     - 根因：客户端发送队列 16MB 硬限制，与服务器端 `WEBSOCKET_MAX_SIZE_MB` 无关
     - 解决方案：降低单段体积，让 Base64 长度 <~15.5MB（约等于 MP4 <~11.6MB）

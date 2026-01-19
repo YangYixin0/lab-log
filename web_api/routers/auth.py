@@ -8,7 +8,7 @@ from web_api.auth import hash_password, verify_password, create_session, delete_
 from web_api.dependencies import get_db
 from storage.seekdb_client import SeekDBClient
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=UserResponse)

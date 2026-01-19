@@ -7,7 +7,7 @@ from web_api.dependencies import get_db, get_current_user
 from web_api.auth import calculate_public_key_fingerprint
 from storage.seekdb_client import SeekDBClient
 
-router = APIRouter(prefix="/api/users", tags=["users"])
+router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.get("/me", response_model=UserResponse)

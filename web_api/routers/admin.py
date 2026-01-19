@@ -12,7 +12,7 @@ from web_api.dependencies import get_db, get_current_user
 from storage.seekdb_client import SeekDBClient
 from indexing.embedding_service import EmbeddingService
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 @router.get("/tables", response_model=TableListResponse)
