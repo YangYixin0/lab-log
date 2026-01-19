@@ -79,33 +79,52 @@ class AppearanceCache:
     """人物外貌缓存管理器"""
     
     def __init__(self):
-        self.records: Dict[str, AppearanceRecord] = {}  # person_id -> record
+        self.records: Dict[str, AppearanceRecord] = {}  # key (f"{person_id}_{date}") -> record
         self.union_find = UnionFind()
+        self.nominal_date: Optional[str] = None  # YYYY-MM-DD
     
+    def _get_full_id(self, person_id: str) -> str:
+        """获取完整的内部键值 (person_id_date)"""
+        # 如果已经包含了日期后缀（格式 YYYY-MM-DD），则直接返回
+        if re.search(r'_\d{4}-\d{2}-\d{2}$', person_id):
+            return person_id
+        
+        # 否则追加当前名义日期
+        if not self.nominal_date:
+            raise ValueError("名义日期 (nominal_date) 未设置，无法生成复合键")
+        return f"{person_id}_{self.nominal_date}"
+
+    def _strip_date(self, full_id: str) -> str:
+        """剥离日期后缀，返回原始 person_id (如 p1)"""
+        return re.sub(r'_\d{4}-\d{2}-\d{2}$', '', full_id)
+
     def add(self, person_id: str, appearance: str, user_id: Optional[str] = None) -> None:
         """
         追加新人物记录
         
         Args:
-            person_id: 人物编号（必须 > 现存最大）
+            person_id: 人物编号（简写如 p1，或全称如 p1_2025-12-24）
             appearance: 详细外貌描述
             user_id: 可选的用户ID
         """
-        if person_id in self.records:
-            raise ValueError(f"人物编号 {person_id} 已存在，请使用 update 方法")
+        full_id = self._get_full_id(person_id)
         
+        if full_id in self.records:
+            raise ValueError(f"人物编号 {full_id} 已存在，请使用 update 方法")
+        
+        # 检查是否满足新增编号必须 > 现存最大的规则（仅针对简写部分）
         max_id = self.get_max_person_id_number()
         new_id_num = self._extract_number(person_id)
         if max_id is not None and new_id_num <= max_id:
             raise ValueError(f"新增编号 {person_id} 必须大于现存最大编号 p{max_id}")
         
-        self.records[person_id] = AppearanceRecord(
-            person_id=person_id,
+        self.records[full_id] = AppearanceRecord(
+            person_id=full_id,
             appearance=appearance,
             user_id=user_id
         )
         # 初始化并查集节点
-        self.union_find.find(person_id)
+        self.union_find.find(full_id)
     
     def update(self, person_id: str, appearance: Optional[str] = None, 
                user_id: Optional[str] = None) -> None:
@@ -117,11 +136,13 @@ class AppearanceCache:
             appearance: 新的外貌描述（如提供则替换）
             user_id: 用户ID（如提供则更新）
         """
+        full_id = self._get_full_id(person_id)
+        
         # 找到实际的主编号
-        root_id = self.union_find.find(person_id)
+        root_id = self.union_find.find(full_id)
         
         if root_id not in self.records:
-            raise ValueError(f"人物编号 {person_id}（主编号 {root_id}）不存在")
+            raise ValueError(f"人物编号 {full_id}（主编号 {root_id}）不存在")
         
         record = self.records[root_id]
         if appearance is not None:
@@ -137,6 +158,9 @@ class AppearanceCache:
             merge_from: 被合并的小编号
             target_person_id: 目标大编号
         """
+        full_from = self._get_full_id(merge_from)
+        full_target = self._get_full_id(target_person_id)
+
         from_num = self._extract_number(merge_from)
         to_num = self._extract_number(target_person_id)
         
@@ -146,19 +170,19 @@ class AppearanceCache:
             )
         
         # 执行并查集合并
-        self.union_find.union(merge_from, target_person_id)
+        self.union_find.union(full_from, full_target)
         
         # 如果被合并的记录有 user_id 但目标没有，则继承
-        from_root = self.union_find.find(merge_from)
-        if merge_from in self.records and from_root in self.records:
-            from_record = self.records[merge_from]
+        from_root = self.union_find.find(full_from)
+        if full_from in self.records and from_root in self.records:
+            from_record = self.records[full_from]
             to_record = self.records[from_root]
             if from_record.user_id and not to_record.user_id:
                 to_record.user_id = from_record.user_id
     
     def get_for_prompt(self) -> Tuple[List[Dict], List[Dict]]:
         """
-        获取用于提示词的外貌表数据
+        获取用于提示词的外貌表数据（剥离日期后缀）
         
         Returns:
             (主记录列表, 别名列表)
@@ -173,7 +197,7 @@ class AppearanceCache:
             if root in self.records:
                 record = self.records[root]
                 main_records.append({
-                    "person_id": record.person_id,
+                    "person_id": self._strip_date(record.person_id),
                     "appearance": record.appearance,
                     "user_id": record.user_id
                 })
@@ -182,8 +206,8 @@ class AppearanceCache:
                 aliases = self.union_find.get_all_aliases(root)
                 for alias in aliases:
                     all_aliases.append({
-                        "alias": alias,
-                        "main_person_id": root
+                        "alias": self._strip_date(alias),
+                        "main_person_id": self._strip_date(root)
                     })
         
         return main_records, all_aliases
@@ -198,20 +222,21 @@ class AppearanceCache:
         if not self.records:
             return None
         max_num = 0
-        for person_id in self.records:
-            num = self._extract_number(person_id)
+        for full_id in self.records:
+            num = self._extract_number(full_id)
             if num > max_num:
                 max_num = num
         return max_num if max_num > 0 else None
     
     def _extract_number(self, person_id: str) -> int:
-        """从 person_id (如 p1, p23) 提取数字"""
-        match = re.search(r'\d+', person_id)
-        return int(match.group()) if match else 0
+        """从 person_id (如 p1, p1_2025-12-24) 提取数字"""
+        match = re.search(r'p(\d+)', person_id)
+        return int(match.group(1)) if match else 0
     
     def get_record(self, person_id: str) -> Optional[AppearanceRecord]:
         """获取人物记录（自动解析合并关系）"""
-        root_id = self.union_find.find(person_id)
+        full_id = self._get_full_id(person_id)
+        root_id = self.union_find.find(full_id)
         return self.records.get(root_id)
     
     def dump_to_file(self, path: str) -> None:
@@ -225,6 +250,7 @@ class AppearanceCache:
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
         data = {
+            "nominal_date": self.nominal_date,
             "records": {
                 pid: {
                     "person_id": r.person_id,
@@ -270,6 +296,7 @@ class AppearanceCache:
                 
                 data = json.loads(content)
             
+            self.nominal_date = data.get("nominal_date")
             self.records.clear()
             for pid, r in data.get("records", {}).items():
                 self.records[pid] = AppearanceRecord(

@@ -31,21 +31,21 @@ from log_writer.encryption_service import FieldEncryptionService
 
 def load_appearance_cache(date: datetime) -> AppearanceCache:
     """
-    加载指定日期的外貌缓存
+    加载外貌缓存 (appearances.json)
     
     Args:
-        date: 日期
+        date: 日期 (已废弃，现在统一读取 appearances.json)
     
     Returns:
         AppearanceCache 实例
     """
     cache = AppearanceCache()
-    cache_path = Path("logs_debug") / "appearances_today.json"
+    cache_path = Path("logs_debug") / "appearances.json"
     
     if cache_path.exists():
         loaded = cache.load_from_file(str(cache_path))
         if loaded:
-            print(f"[加载] 外貌缓存加载成功，共 {cache.get_record_count()} 条记录，"
+            print(f"[加载] 外貌缓存加载成功，名义日期: {cache.nominal_date}，共 {cache.get_record_count()} 条记录，"
                   f"{cache.get_root_count()} 个主编号")
         else:
             print("[警告] 外貌缓存加载失败")
@@ -139,7 +139,12 @@ def encrypt_and_save_appearances(
     dry_run: bool = False
 ) -> int:
     """
-    加密 user_id 和 appearance 并写入数据库
+    加密外貌记录并写入数据库
+    
+    逻辑：
+    1. 如果记录有 user_id，使用该用户的公钥加密 appearance 和 user_id
+    2. 如果记录没有 user_id，则明文存储
+    3. 加密产生的 DEK 存入密钥表，user_id 留空
     
     Args:
         cache: 外貌缓存
@@ -149,83 +154,96 @@ def encrypt_and_save_appearances(
     Returns:
         保存的记录数量
     """
-    print(f"[入库] {'预览模式 - ' if dry_run else ''}加密外貌记录并写入数据库...")
-    
-    # 获取 admin 用户的公钥
-    try:
-        admin_public_key = db_client.get_user_public_key('admin')
-    except Exception as e:
-        print(f"[错误] 获取 admin 用户公钥失败: {e}")
-        return 0
+    print(f"[入库] {'预览模式 - ' if dry_run else ''}处理外貌记录并写入数据库...")
     
     # 初始化加密服务
     encryption_service = FieldEncryptionService()
     
     # 获取主记录
     main_records, aliases = cache.get_for_prompt()
+    nominal_date = cache.nominal_date
+    if not nominal_date:
+        print("[错误] 缓存中未发现名义日期，无法入库")
+        return 0
     
     saved_count = 0
     for record in main_records:
         person_id = record['person_id']
         appearance = record['appearance']
-        user_id = record.get('user_id')
+        target_user_id = record.get('user_id')
         
-        # 使用特殊的 event_id 格式
-        appearance_event_id = f"appearance_{person_id}"
+        # 使用包含日期的复合 ID 格式作为加密上下文 ID
+        appearance_event_id = f"appearance_{person_id}_{nominal_date}"
         
-        encrypted_user_id: Optional[str] = None
-        encrypted_appearance: Optional[str] = None
+        db_user_id: Optional[str] = None
+        db_appearance: Optional[str] = None
         
         if not dry_run:
             try:
-                # 加密 appearance（所有记录都需要）
-                encrypted_appearance, encrypted_dek_appearance = encryption_service.encrypt_field_value(
-                    event_id=appearance_event_id,
-                    field_path="appearance",
-                    value=appearance,
-                    user_id='admin',
-                    public_key_pem=admin_public_key
-                )
-                
-                # 保存 appearance 的加密密钥
-                db_client.insert_field_encryption_key(
-                    event_id=appearance_event_id,
-                    field_path="appearance",
-                    user_id='admin',
-                    encrypted_dek=encrypted_dek_appearance
-                )
-                
-                # 如果有 user_id，也加密它
-                if user_id:
+                if target_user_id:
+                    # 1. 尝试获取该用户的公钥
+                    try:
+                        user_public_key = db_client.get_user_public_key(target_user_id)
+                    except Exception as e:
+                        print(f"  [错误] 关键隐私失败: 用户 {target_user_id} 存在但系统中未找到其公钥，无法加密隐私数据。详细错误: {e}")
+                        sys.exit(1) # 明确要求报错中止流程
+
+                    # 2. 加密 appearance
+                    encrypted_appearance, encrypted_dek_appearance = encryption_service.encrypt_field_value(
+                        event_id=appearance_event_id,
+                        field_path="appearance",
+                        value=appearance,
+                        user_id=target_user_id,
+                        public_key_pem=user_public_key
+                    )
+                    
+                    # 3. 保存 appearance 的加密密钥 (user_id 字段留空)
+                    db_client.insert_field_encryption_key(
+                        ref_id=person_id,
+                        ref_date=nominal_date,
+                        field_path="appearance",
+                        user_id=None,
+                        encrypted_dek=encrypted_dek_appearance
+                    )
+                    
+                    # 4. 加密 user_id 本身
                     encrypted_user_id, encrypted_dek_user_id = encryption_service.encrypt_field_value(
                         event_id=appearance_event_id,
                         field_path="user_id",
-                        value=user_id,
-                        user_id='admin',
-                        public_key_pem=admin_public_key
+                        value=target_user_id,
+                        user_id=target_user_id,
+                        public_key_pem=user_public_key
                     )
                     
-                    # 保存 user_id 的加密密钥
+                    # 5. 保存 user_id 的加密密钥 (user_id 字段留空)
                     db_client.insert_field_encryption_key(
-                        event_id=appearance_event_id,
+                        ref_id=person_id,
+                        ref_date=nominal_date,
                         field_path="user_id",
-                        user_id='admin',
+                        user_id=None,
                         encrypted_dek=encrypted_dek_user_id
                     )
-                
-                # 插入外貌记录
+                    
+                    db_user_id = encrypted_user_id
+                    db_appearance = encrypted_appearance
+                    status_msg = f"已加密（用户={target_user_id}）"
+                else:
+                    # 无 user_id，明文存储
+                    db_user_id = None
+                    db_appearance = appearance
+                    status_msg = "明文存储"
+
+                # 6. 插入外貌记录
                 db_client.insert_appearance_record(
                     person_id=person_id,
-                    encrypted_user_id=encrypted_user_id,
-                    encrypted_appearance=encrypted_appearance
+                    date=nominal_date,
+                    user_id=db_user_id,
+                    appearance=db_appearance
                 )
-                
+
                 saved_count += 1
-                if user_id:
-                    print(f"  {person_id}: 外貌已加密（长度={len(appearance)}），用户ID已加密（{user_id[:8]}...）")
-                else:
-                    print(f"  {person_id}: 外貌已加密（长度={len(appearance)}），无用户ID")
-                    
+                print(f"  {person_id}: {status_msg}, 外貌长度={len(appearance)}")
+
             except Exception as e:
                 print(f"  [错误] 处理 {person_id} 失败: {e}")
                 import traceback
@@ -234,10 +252,10 @@ def encrypt_and_save_appearances(
         else:
             # 预览模式
             saved_count += 1
-            if user_id:
-                print(f"  {person_id}: 将加密外貌（长度={len(appearance)}）和用户ID（{user_id[:8]}...）")
+            if target_user_id:
+                print(f"  {person_id}: 将使用用户 {target_user_id} 的公钥加密")
             else:
-                print(f"  {person_id}: 将加密外貌（长度={len(appearance)}），无用户ID")
+                print(f"  {person_id}: 将以明文存储")
     
     print(f"[入库] 完成，{'将' if dry_run else '已'}保存 {saved_count} 条记录")
     return saved_count

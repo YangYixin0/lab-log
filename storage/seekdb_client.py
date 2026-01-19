@@ -93,70 +93,89 @@ class SeekDBClient:
         except Exception as e:
             raise RuntimeError(f"获取用户公钥失败: {e}")
     
-    def insert_field_encryption_key(self, event_id: str, field_path: str,
-                                   user_id: str, encrypted_dek: str) -> None:
-        """插入字段加密密钥（DEK）"""
+    def insert_field_encryption_key(self, ref_id: str, field_path: str,
+                                   user_id: Optional[str], encrypted_dek: str,
+                                   ref_date: str = '1970-01-01') -> None:
+        """
+        插入字段加密密钥（DEK）
+        
+        Args:
+            ref_id: 关联 ID（event_id 或 person_id）
+            field_path: JSON 路径
+            user_id: 用户 ID（允许为空，例如为外貌记录加密时）
+            encrypted_dek: 加密后的 DEK
+            ref_date: 关联日期 (YYYY-MM-DD)，默认为 1970-01-01
+        """
         self._ensure_connected()
         
         sql = """
-            INSERT INTO field_encryption_keys (event_id, field_path, user_id, encrypted_dek)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO field_encryption_keys (ref_id, ref_date, field_path, user_id, encrypted_dek)
+            VALUES (%s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE encrypted_dek = VALUES(encrypted_dek)
         """
         
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(sql, (event_id, field_path, user_id, encrypted_dek))
+                cursor.execute(sql, (ref_id, ref_date, field_path, user_id, encrypted_dek))
             self.connection.commit()
         except Exception as e:
             self.connection.rollback()
             raise RuntimeError(f"插入字段加密密钥失败: {e}")
-    
+
     def insert_appearance_record(
         self, 
         person_id: str, 
-        encrypted_user_id: Optional[str], 
-        encrypted_appearance: Optional[str]
+        date: str,
+        user_id: Optional[str], 
+        appearance: Optional[str]
     ) -> None:
         """
         插入人物外貌记录
         
         Args:
             person_id: 人物编号，如 p1, p2
-            encrypted_user_id: 加密后的用户ID（Base64编码，包含nonce+ciphertext），可为 None
-            encrypted_appearance: 加密后的外貌描述（Base64编码，包含nonce+ciphertext），可为 None
+            date: 名义日期 (YYYY-MM-DD)
+            user_id: 用户ID（可能是加密后的 Base64 字符串，也可能是明文）
+            appearance: 外貌描述（可能是加密后的 Base64 字符串，也可能是明文）
         """
         self._ensure_connected()
         
         sql = """
-            INSERT INTO person_appearances (person_id, encrypted_user_id, encrypted_appearance)
-            VALUES (%s, %s, %s)
+            INSERT INTO person_appearances (person_id, date, user_id, appearance)
+            VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE 
-                encrypted_user_id = VALUES(encrypted_user_id),
-                encrypted_appearance = VALUES(encrypted_appearance)
+                user_id = VALUES(user_id),
+                appearance = VALUES(appearance)
         """
         
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(sql, (person_id, encrypted_user_id, encrypted_appearance))
+                cursor.execute(sql, (person_id, date, user_id, appearance))
             self.connection.commit()
         except Exception as e:
             self.connection.rollback()
             raise RuntimeError(f"插入人物外貌记录失败: {e}")
-    
-    def get_field_encryption_key(self, event_id: str, field_path: str,
-                                 user_id: str) -> Optional[str]:
+
+    def get_field_encryption_key(self, ref_id: str, field_path: str,
+                                 user_id: Optional[str] = None,
+                                 ref_date: str = '1970-01-01') -> Optional[str]:
         """获取字段加密密钥（DEK）"""
         self._ensure_connected()
         
         sql = """
             SELECT encrypted_dek FROM field_encryption_keys
-            WHERE event_id = %s AND field_path = %s AND user_id = %s
+            WHERE ref_id = %s AND ref_date = %s AND field_path = %s
         """
+        params = [ref_id, ref_date, field_path]
+        if user_id:
+            sql += " AND user_id = %s"
+            params.append(user_id)
+        else:
+            sql += " AND user_id IS NULL"
         
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(sql, (event_id, field_path, user_id))
+                cursor.execute(sql, params)
                 result = cursor.fetchone()
                 if result is None:
                     return None

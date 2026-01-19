@@ -21,7 +21,8 @@ class VideoLogPipeline:
                  chunker: Optional[LogChunker] = None,
                  embedding_service: Optional[EmbeddingService] = None,
                  db_client: Optional[SeekDBClient] = None,
-                 enable_indexing: bool = False):
+                 enable_indexing: bool = False,
+                 nominal_date: Optional[str] = None):
         """
         初始化处理流程
         
@@ -32,10 +33,16 @@ class VideoLogPipeline:
             embedding_service: 嵌入服务，如果为 None 则创建默认实例
             db_client: 数据库客户端，如果为 None 则创建默认实例
             enable_indexing: 是否启用索引（分块和嵌入），默认 False（已废弃，索引完全由独立脚本处理，不再由视频处理触发）
+            nominal_date: 名义日期 (YYYY-MM-DD)，用于外貌缓存的复合键
         """
         self.db_client = db_client or SeekDBClient()
         
         self.video_processor = video_processor or Qwen3VLProcessor()
+        # 设置名义日期（如果提供了）
+        if nominal_date and hasattr(self.video_processor, 'appearance_cache'):
+            self.video_processor.appearance_cache.nominal_date = nominal_date
+            print(f"[Pipeline]: 已设置名义日期: {nominal_date}")
+            
         self.log_writer = log_writer or LogWriter(self.db_client)
         self.chunker = chunker or LogChunker()
         self.embedding_service = embedding_service or EmbeddingService()

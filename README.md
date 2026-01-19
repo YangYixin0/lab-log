@@ -11,8 +11,8 @@
 - **人物外貌管理**：自动维护人物外貌表缓存，支持追加、更新、合并操作，使用并查集管理编号合并关系
 - **二维码识别**：Android 采集端实时识别用户二维码，自动关联用户身份与视频片段
 - **结构化日志**：将视频内容转换为带时间戳的结构化事件日志（事件不加密，直接写入数据库）
-- **字段级加密**：支持对敏感字段（如人物外观特征）进行加密，使用混合加密方案（AES-GCM + RSA-OAEP）（日终处理时对人物外貌表加密）
-- **向量检索**：支持日志的向量嵌入和语义搜索，便于后续的智能查询和分析
+- **字段级加密**：支持对敏感字段（如人物外观特征）进行加密，使用混合加密方案（AES-GCM + RSA-OAEP）。日终处理时，系统会自动根据识别出的用户身份使用对应的公钥进行加密，确保隐私数据仅该用户可解。
+- **向量检索**：支持日志的向量嵌入和语义搜索，便于后续的智能查询和分析。日终处理会自动触发索引构建。
 - **Web 前端**：提供用户友好的 Web 界面，支持用户注册、登录、查看数据和管理功能
 - **权限管理**：支持用户角色（admin/user），admin 用户可以查看数据库和进行向量搜索
 
@@ -58,7 +58,7 @@
     ↓
 [周期性保存] 每处理 N 个分段，dump 外貌缓存到文件
     ↓
-[日终处理] 并查集压缩 → 加密 user_id → 写入数据库 → 更新事件 person_ids → 触发索引
+[日终处理] 并查集压缩 → 动态公钥获取与加密 → 写入数据库 → 更新事件 person_ids → 触发索引
     ↓
 完成
 ```
@@ -135,12 +135,18 @@
    - 同时写入 `logs_debug/event_logs.jsonl` 用于调试
    - 人物外貌表缓存在内存中，每处理 N 个分段自动保存到 `logs_debug/appearances_today.json`
    - 每个分段理解后立即写入数据库，不等待所有分段完成
-4. **日终处理**（可选）：
-   - 使用 `scripts/end_of_day.py` 执行日终处理
-   - 加载外貌缓存，执行并查集去重压缩
-   - 加密 user_id 并写入数据库
-   - 更新数据库中事件的 person_ids（将被合并编号替换为主编号）
-   - 触发索引（分块和嵌入）
+4. **日终处理**（脚本驱动）：
+   - 使用 `scripts/end_of_day.py` 执行，处理 `logs_debug/appearances.json`。
+   - **去重压缩**：执行并查集路径压缩，将同一人的多个临时编号映射到最终主编号。
+   - **隐私加密（核心逻辑）**：
+     - 如果记录关联了 `user_id`：从数据库获取该用户的 RSA 公钥，对 `appearance` 和 `user_id` 进行混合加密。
+     - 如果记录无 `user_id`：以明文形式直接入库。
+     - 如果有 `user_id` 但系统中缺失公钥：脚本将报错中止，防止隐私泄露。
+   - **数据入库**：
+     - 写入 `person_appearances` 表（复合主键：`person_id` + `date`）。
+     - 写入 `field_encryption_keys` 表（双字段索引：`ref_id`=person_id, `ref_date`=nominal_date, `user_id`=NULL）。
+   - **状态更新（暂未实现）**：遍历数据库中当天的事件，将 `structured` 数据中的旧人物编号（已被合并的编号）更新为最终的主编号。
+   - **触发索引**：自动调用 `scripts/index_events.py` 对当天所有新事件进行向量化。
 5. **索引构建**（手动触发）：
    - 使用 `scripts/index_events.py` 手动触发索引
    - 对未索引的事件（`is_indexed = FALSE`）进行分块和嵌入
@@ -693,9 +699,10 @@ python scripts/clear_test_data.py
 - 从视频画面提取时间戳
 
 ### 日志加密
-- **事件日志**：动态上下文模式下，事件不加密直接写入数据库
-- **人物外貌表**：缓存在内存/文件中（明文），日终处理时加密 user_id 并写入数据库
-- **传统模式**：字段级加密（混合加密：AES-GCM + RSA-OAEP）
+- **事件日志**：事件不加密直接写入数据库。
+- **人物外貌表**：在 `logs_debug/appearances.json` 中明文缓存。日终处理时，根据记录中的 `user_id` 自动选择对应的用户公钥进行混合加密入库（无用户则保持明文）。
+- **密钥管理**：加密产生的对称密钥（DEK）存储在 `field_encryption_keys` 表中，使用 `(ref_id, ref_date)` 双字段索引关联具体的业务记录。
+- **传统模式**：字段级加密（混合加密：AES-GCM + RSA-OAEP）（未来将移除）
   - 默认加密字段：`person.clothing_color`, `person.hair_color`
   - 可通过 `config/encryption_config.py` 配置
 
@@ -987,15 +994,13 @@ python streaming_server/test_qr_server.py
    - 识别结果随 MP4 分段元数据一起上报，格式为 `qr_results` 数组，包含 `user_id`、`public_key_fingerprint`、`confidence`、`detected_at_ms`、`detected_at` 字段
    - 识别成功时播放系统提示音并在预览层显示"已识别用户"提示
 
-10. **动态上下文功能**：
-    - 默认启用动态上下文模式（`DYNAMIC_CONTEXT_ENABLED=true`）
-    - 每个录制会话维护独立的人物外貌缓存
-    - 启动时自动加载已存在的外貌缓存文件（`logs_debug/appearances_today.json`），会继承上一次调试的结果
-    - 事件上下文从 JSONL 文件（`logs_debug/event_logs.jsonl`）读取，无需数据库连接
-    - 外貌缓存自动保存到 `logs_debug/appearances_today.json`（每处理 N 个分段）
-    - 事件不加密直接写入数据库和 JSONL 文件，人物外貌表日终再加密入库
-    - 使用 `scripts/end_of_day.py` 执行日终处理（压缩、加密、更新事件 person_ids）
-    - 使用 `scripts/clear_test_data.py` 清空测试数据时，会同时清空事件日志文件和人物外貌缓存
+10. **动态上下文与日终处理**：
+    - 默认启用动态上下文模式（`DYNAMIC_CONTEXT_ENABLED=true`）。
+    - 每个录制会话根据启动时间或目录名维护独立的人物外貌缓存（`appearances.json`）。
+    - 启动时自动加载已存在的外貌缓存文件，系统会通过复合主键 `(person_id, date)` 区分不同日期的同一编号。
+    - 事件上下文从 JSONL 文件读取，外貌缓存定期保存。
+    - **隐私保护**：日终处理（`end_of_day.py`）会将外貌数据使用用户公钥加密。如果用户存在但未上传公钥，系统将报错并中止处理，以确保安全。
+    - **清理建议**：使用 `scripts/clear_test_data.py` 时，可以分阶段选择清空视频理解原始数据或日终处理后的加密数据。
 
 11. **画面条纹问题解决经验**：
     - **问题现象**：竖屏采集时视频画面出现绿色/紫色条纹

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """清空测试数据脚本
 
-用于清空测试后的数据库数据和调试日志文件。
+用于有选择地清空视频理解和日终处理所生成的测试数据。
 """
 
 import sys
 import os
+import json
+import pymysql
 from pathlib import Path
 from dotenv import load_dotenv
-import pymysql
 
 # 加载环境变量
 load_dotenv()
@@ -19,152 +20,80 @@ sys.path.insert(0, str(project_root))
 
 from config.database_config import DatabaseConfig
 
-
-def clear_database_tables():
-    """清空数据库中的测试数据表"""
+def get_db_connection():
+    """获取数据库连接"""
     config = DatabaseConfig
-    
+    return pymysql.connect(
+        host=config.HOST,
+        port=config.PORT,
+        user=config.USER,
+        password=config.PASSWORD,
+        database=config.DATABASE,
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
+def clear_tables(tables):
+    """清空指定的数据库表"""
     try:
-        # 连接数据库
-        connection = pymysql.connect(
-            host=config.HOST,
-            port=config.PORT,
-            user=config.USER,
-            password=config.PASSWORD,
-            database=config.DATABASE,
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor
-        )
-        
-        print(f"已连接到数据库: {config.HOST}:{config.PORT}/{config.DATABASE}")
-        
+        connection = get_db_connection()
         with connection.cursor() as cursor:
-            # 需要清空的表（按依赖关系顺序）
-            tables_to_clear = [
-                'field_encryption_keys',  # 依赖 logs_raw，先清空
-                'logs_embedding',         # 独立表
-                'logs_raw',               # 核心日志表
-            ]
-            
-            cleared_counts = {}
-            
-            for table in tables_to_clear:
+            # 禁用外键检查以允许 TRUNCATE
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 0;")
+            for table in tables:
                 try:
-                    # 先查询记录数
-                    cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
-                    count_result = cursor.fetchone()
-                    count = count_result['count'] if count_result else 0
-                    
-                    if count > 0:
-                        # 清空表
-                        cursor.execute(f"TRUNCATE TABLE {table}")
-                        cleared_counts[table] = count
-                        print(f"  ✓ 清空表 {table}: {count} 条记录")
-                    else:
-                        print(f"  - 表 {table}: 无数据")
-                        cleared_counts[table] = 0
-                        
+                    cursor.execute(f"TRUNCATE TABLE {table}")
+                    print(f"  ✓ 数据库表 {table} 已清空")
                 except Exception as e:
                     print(f"  ✗ 清空表 {table} 失败: {e}")
-                    continue
-            
-            # 提交事务
-            connection.commit()
-            
-            # 统计总清空记录数
-            total_cleared = sum(cleared_counts.values())
-            if total_cleared > 0:
-                print(f"\n数据库清空完成，共清空 {total_cleared} 条记录")
-            else:
-                print("\n数据库已为空，无需清空")
-            
-            return True
-            
-    except pymysql.Error as e:
-        print(f"数据库操作失败: {e}")
-        return False
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 1;")
+        connection.commit()
+        connection.close()
+        return True
     except Exception as e:
-        print(f"连接数据库失败: {e}")
+        print(f"  ✗ 数据库连接或操作失败: {e}")
         return False
-    finally:
-        if 'connection' in locals():
-            connection.close()
 
-
-def clear_debug_files():
-    """清空或删除调试日志文件和缓存文件"""
+def clear_files(filenames):
+    """清空指定的文件内容"""
     log_dir = project_root / "logs_debug"
-    log_dir.mkdir(exist_ok=True)
-    
-    files_to_clear = [
-        ("event_logs.jsonl", "调试日志文件"),
-        ("appearances_today.json", "人物外貌缓存文件"),
-    ]
-    
-    success_count = 0
-    for filename, description in files_to_clear:
+    for filename in filenames:
         file_path = log_dir / filename
         try:
             if file_path.exists():
-                # 获取文件大小
-                file_size = file_path.stat().st_size
-                
-                # 清空文件（保留文件，但内容为空）
                 file_path.write_text('', encoding='utf-8')
-                print(f"  ✓ 清空{description}: {file_path.name}")
-                print(f"    原文件大小: {file_size} 字节")
-                success_count += 1
+                print(f"  ✓ 文件 {filename} 已清空")
             else:
-                print(f"  - {description}不存在: {file_path.name}")
-                success_count += 1
+                print(f"  - 文件 {filename} 不存在，跳过")
         except Exception as e:
-            print(f"  ✗ 清空{description}失败: {e}")
-    
-    return success_count == len(files_to_clear)
-
+            print(f"  ✗ 清空文件 {filename} 失败: {e}")
 
 def main():
-    """主函数"""
     print("=" * 60)
-    print("清空测试数据")
-    print("=" * 60)
-    print()
-    
-    # 确认操作
-    print("此操作将清空以下数据：")
-    print("  1. 数据库表: logs_raw, logs_embedding, field_encryption_keys")
-    print("  2. 调试日志文件: logs_debug/event_logs.jsonl")
-    print("  3. 人物外貌缓存: logs_debug/appearances_today.json")
-    print()
-    
-    # 可选：添加交互式确认（如果需要，取消下面的注释）
-    # response = input("确认清空？(yes/no): ").strip().lower()
-    # if response not in ['yes', 'y']:
-    #     print("操作已取消")
-    #     return
-    
-    print("开始清空...")
-    print()
-    
-    # 清空数据库
-    print("步骤 1/2: 清空数据库表...")
-    db_success = clear_database_tables()
-    print()
-    
-    # 清空日志文件和缓存文件
-    print("步骤 2/2: 清空调试日志文件和缓存文件...")
-    log_success = clear_debug_files()
-    print()
-    
-    # 总结
-    print("=" * 60)
-    if db_success and log_success:
-        print("✓ 所有测试数据已清空")
-    else:
-        print("✗ 部分操作失败，请检查上述错误信息")
+    print("清理测试数据")
     print("=" * 60)
 
+    # 第一次提问
+    ans1 = input("\n是否清空视频理解所生成的数据库表logs_raw、调试日志文件event_logs.jsonl、appearances.json？(y/N): ").strip().lower()
+    if ans1 == 'y':
+        print("\n正在清理视频理解数据...")
+        clear_tables(['logs_raw'])
+        clear_files(['event_logs.jsonl', 'appearances.json'])
+    else:
+        print("\n已跳过视频理解数据清理。")
+
+    # 第二次提问
+    ans2 = input("\n是否清空日终处理所生成的数据库表person_appearances、field_encryption_keys、logs_embedding？(y/N): ").strip().lower()
+    if ans2 == 'y':
+        print("\n正在清理日终处理数据...")
+        # 注意顺序，或者在 clear_tables 中禁用外键检查
+        clear_tables(['person_appearances', 'field_encryption_keys', 'logs_embedding'])
+    else:
+        print("\n已跳过日终处理数据清理。")
+
+    print("\n" + "=" * 60)
+    print("清理任务完成")
+    print("=" * 60)
 
 if __name__ == '__main__':
     main()
-
