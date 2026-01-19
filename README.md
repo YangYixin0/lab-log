@@ -274,6 +274,9 @@ python scripts/init_database.py
 # DashScope API Key（用于 Qwen3-VL 和 embedding）
 DASHSCOPE_API_KEY=your_api_key_here
 
+# OpenRouter API Key（用于 Gemini 2.5 Flash 等模型）
+OPENROUTER_API_KEY=your_openrouter_key_here
+
 # 加密配置（可选）
 ENCRYPTION_ENABLED=true
 ENCRYPTION_TEST_USER_ID=admin
@@ -299,10 +302,10 @@ DEFAULT_BITRATE_MB=1.0               # 默认码率（MB，默认1.0）
 DEFAULT_FPS=4                       # 默认帧率（默认4）
 
 # 视频理解模型配置（可选）
-QWEN_MODEL=qwen3-vl-flash  # 模型名称：qwen3-vl-flash 或 qwen3-vl-plus（默认 qwen3-vl-flash）
+VIDEO_UNDERSTANDING_MODEL=qwen3-vl-flash  # 视频理解模型：qwen3-vl-flash / qwen3-vl-plus / google/gemini-2.5-flash-preview-09-2025（默认 qwen3-vl-flash）
 VIDEO_FPS=2.0  # 视频抽帧率，表示每隔 1/fps 秒抽取一帧（默认 2.0）
 ENABLE_THINKING=true  # 是否启用思考（默认true）
-THINKING_BUDGET=8192  # 思考预算（tokens，默认8192）
+THINKING_BUDGET=8192  # 思考预算（tokens，默认8192，qwen3-vl最大81920）
 VL_HIGH_RESOLUTION_IMAGES=true  # 是否启用高分辨率图像处理（默认 true）
 VL_TEMPERATURE=0.1  # 模型温度参数，控制输出随机性（默认 0.1）
 VL_TOP_P=0.7  # Top-p 采样参数，控制输出多样性（默认 0.7）
@@ -316,6 +319,11 @@ SEEKDB_DATABASE=lab_log
 SEEKDB_USER=root
 SEEKDB_PASSWORD=  # 如果无密码，请留空（SeekDB 默认 root 用户密码为空）
 ```
+
+**使用 OpenRouter (Gemini) 的方式**：
+- 设置 `VIDEO_UNDERSTANDING_MODEL=google/gemini-2.5-flash-preview-09-2025`
+- 配置 `OPENROUTER_API_KEY`
+- 处理时会将模型的思考内容追加写入 `logs_debug/event_logs_thinking.jsonl`（每行包含 `segment_id` 和 `thinking`；若未返回则记录“未获取到思考内容”）
 
 **注意**：数据库配置会在初始化数据库时使用。如果使用默认值，可以省略数据库配置项。
 
@@ -930,7 +938,8 @@ python streaming_server/test_qr_server.py
 - **uv**：快速 Python 包管理工具
 - **FastAPI**：现代、快速的 Web 框架，用于构建 API
 - **SeekDB**：AI 原生混合搜索数据库（支持向量、全文、JSON）
-- **Qwen3-VL Flash**：视频理解模型（DashScope API）
+- **Qwen3-VL Flash / Plus**：视频理解模型（DashScope API）
+- **Gemini 2.5 Flash**：视频理解模型（OpenRouter API）
 - **Qwen text-embedding-v4**：文本向量嵌入模型（1024 维）
 - **ffmpeg/ffprobe**：视频处理和分段
 - **Cryptography**：混合加密（AES-GCM + RSA-OAEP）
@@ -965,7 +974,10 @@ python streaming_server/test_qr_server.py
    - 用户注册时生成的私钥仅显示一次，请务必妥善保管
    - 私钥丢失后无法恢复，需要重新注册
 
-2. **API Key**：确保 `DASHSCOPE_API_KEY` 有效且有足够的配额
+2. **API Key**：
+   - 使用 `qwen3-vl-flash / qwen3-vl-plus`：确保 `DASHSCOPE_API_KEY` 有效且有足够的配额
+   - 使用 `google/gemini-2.5-flash-preview-09-2025`：确保 `OPENROUTER_API_KEY` 有效且有足够的配额
+   - google/gemini-2.5-flash-preview-09-2025 的识别效果好像比 google/gemini-2.5-flash 要好一点
 
 3. **ffmpeg/ffprobe**：视频处理需要系统已安装 ffmpeg
 
@@ -1027,3 +1039,6 @@ python streaming_server/test_qr_server.py
       2) 降低码率（实测 1MB 码率、60s 段约 6.9MB MP4，Base64 8.7MB，正常发送）
       3) 降低分辨率或帧率
 
+15. **视频长度与 API 限制**：
+    - 使用 OpenRouter (Gemini 2.5 Flash) 时，由于视频是以 Base64 格式随请求发送，受 API 请求体大小限制，建议单段 MP4 文件大小控制在 **15MB 以内**（Base64 后约 20MB）。
+    - 默认的 60s 分段、1MB 码率设置下，MP4 约 7-8MB，可正常调用。如果增加码率或时长，请注意监控请求是否因 Payload Too Large 失败。

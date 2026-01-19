@@ -12,6 +12,8 @@ cryptography>=41.0.0
 
 # AI 模型 API
 dashscope>=1.17.0
+openai
+requests
 
 # 环境变量
 python-dotenv>=1.0.0

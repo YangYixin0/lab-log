@@ -59,7 +59,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
         
         Args:
             api_key: DashScope API Key，如果为 None 则从环境变量读取
-            model: 模型名称，如果为 None 则从环境变量 QWEN_MODEL 读取，默认 "qwen3-vl-flash"
+            model: 模型名称，如果为 None 则从环境变量 VIDEO_UNDERSTANDING_MODEL 读取，默认 "qwen3-vl-flash"
             fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧，如果为 None 则从环境变量 VIDEO_FPS 读取，默认 2.0
             enable_thinking: 是否启用思考，如果为 None 则从环境变量 ENABLE_THINKING 读取，默认 True
             thinking_budget: 思考预算，如果为 None 则从环境变量 THINKING_BUDGET 读取，默认 8192 tokens
@@ -72,7 +72,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
             raise ValueError("未提供 DASHSCOPE_API_KEY，请在环境变量或参数中设置")
         
         # 从环境变量读取模型配置，如果没有则使用默认值
-        self.model = model or os.getenv('QWEN_MODEL', 'qwen3-vl-flash')
+        self.model = model or os.getenv('VIDEO_UNDERSTANDING_MODEL', 'qwen3-vl-flash')
         
         # 从环境变量读取思考配置
         if enable_thinking is None:
@@ -125,6 +125,20 @@ class Qwen3VLFlashProcessor(VideoProcessor):
         # 是否使用动态上下文（通过检查是否有 event_context 来判断）
         self._use_dynamic_context = event_context is not None
     
+    def _write_thinking_log(self, segment_id: str, thinking: Optional[str]) -> None:
+        """将模型思考内容写入日志文件"""
+        log_path = Path("logs_debug/event_logs_thinking.jsonl")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        log_entry = {
+            "segment_id": segment_id,
+            "thinking": thinking or "未获取到思考内容",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+
     def process_segment(self, segment: VideoSegment) -> VideoUnderstandingResult:
         """
         处理视频分段，返回理解结果
@@ -190,7 +204,12 @@ class Qwen3VLFlashProcessor(VideoProcessor):
             response = MultiModalConversation.call(**api_params)
             
             # 解析响应
-            result_text = response["output"]["choices"][0]["message"].content[0]["text"]
+            message = response["output"]["choices"][0]["message"]
+            result_text = message.content[0]["text"]
+            
+            # 记录思考过程
+            thinking = message.get("reasoning_content") or message.get("thought")
+            self._write_thinking_log(segment.segment_id, thinking)
             
             if self._use_dynamic_context:
                 # 解析动态上下文响应
@@ -291,7 +310,13 @@ class Qwen3VLFlashProcessor(VideoProcessor):
             
             response = MultiModalConversation.call(**api_params)
             
-            result_text = response["output"]["choices"][0]["message"].content[0]["text"]
+            message = response["output"]["choices"][0]["message"]
+            result_text = message.content[0]["text"]
+            
+            # 记录思考过程
+            thinking = message.get("reasoning_content") or message.get("thought")
+            self._write_thinking_log(segment.segment_id, thinking)
+            
             return self._parse_dynamic_response(result_text, segment)
             
         except Exception as e:

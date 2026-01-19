@@ -74,11 +74,11 @@ def main():
     print("=" * 60)
 
     # 第一次提问
-    ans1 = input("\n是否清空视频理解所生成的数据库表logs_raw、调试日志文件event_logs.jsonl、appearances.json？(y/N): ").strip().lower()
+    ans1 = input("\n是否清空视频理解所生成的数据库表logs_raw、调试日志文件event_logs.jsonl、event_logs_thinking.jsonl、appearances.json？(y/N): ").strip().lower()
     if ans1 == 'y':
         print("\n正在清理视频理解数据...")
         clear_tables(['logs_raw'])
-        clear_files(['event_logs.jsonl', 'appearances.json'])
+        clear_files(['event_logs.jsonl', 'event_logs_thinking.jsonl', 'appearances.json'])
     else:
         print("\n已跳过视频理解数据清理。")
 
