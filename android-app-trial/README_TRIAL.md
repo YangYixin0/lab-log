@@ -7,8 +7,8 @@
 - ✅ **视频录制**：最长 60 秒，支持 H.265/H.264 编码
 - ✅ **动态旋转**：根据手机物理姿态自动旋转视频方向
 - ✅ **时间戳水印**：使用 OCRB 字体在视频上叠加时间戳
-- ✅ **视频理解**：调用阿里云 Qwen3-VL 大模型分析视频
-  - 支持 `qwen3-vl-flash` 和 `qwen3-vl-plus` 模型选择
+- ✅ **视频理解**：调用阿里云 Qwen3-VL 或 OpenRouter Gemini 大模型分析视频
+  - 支持 `qwen3-vl-flash`、`qwen3-vl-plus` 以及 `Gemini-2.5-Flash` (OpenRouter) 模型选择
   - 可自定义提示词，支持重置为默认值
   - 支持配置视频理解参数（FPS、thinking、temperature 等）
 - ✅ **流式输出**：实时显示理解进度
@@ -27,6 +27,7 @@
 ```properties
 # API 配置
 dashscope_api_key=your_api_key_here
+openrouter_api_key=your_openrouter_key_here
 qwen_model=qwen3-vl-flash
 
 # 视频参数
@@ -94,7 +95,7 @@ cd /root/lab-log/android-app-trial
 ### 4. 重新理解测试
 
 - [ ] **视频理解参数对话框**：点击"开始理解"/"重新理解"按钮打开对话框
-- [ ] **模型选择**：在 qwen3-vl-flash 和 qwen3-vl-plus 之间切换
+- [ ] **模型选择**：在 qwen3-vl-flash、qwen3-vl-plus 和 Gemini-2.5-Flash 之间切换
 - [ ] **提示词编辑**：修改提示词内容
 - [ ] **提示词重置**：点击"重置"按钮恢复默认提示词
 - [ ] **发起理解**：点击"开始理解"按钮

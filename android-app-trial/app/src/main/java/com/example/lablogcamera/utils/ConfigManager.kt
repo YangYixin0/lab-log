@@ -43,6 +43,9 @@ object ConfigManager {
     val apiKey: String
         get() = getProperty("dashscope_api_key", "")
     
+    val openRouterApiKey: String
+        get() = getProperty("openrouter_api_key", "")
+    
     val qwenModel: String
         get() = getProperty("qwen_model", "qwen3-vl-flash")
     

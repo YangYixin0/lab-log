@@ -100,9 +100,22 @@ class DetailViewModel(application: Application) : AndroidViewModel(application) 
                     return@launch
                 }
                 
+                // 根据模型选择 API Key
+                val apiKey = if (model.contains("google/")) {
+                    ConfigManager.openRouterApiKey
+                } else {
+                    ConfigManager.apiKey
+                }
+                
+                if (apiKey.isEmpty() || apiKey == "your_api_key_here") {
+                    _errorMessage.value = "请先在 assets/config.properties 中配置 API Key"
+                    _isUnderstanding.value = false
+                    return@launch
+                }
+                
                 // 根据选择的模型创建服务实例
                 val videoUnderstandingService = VideoUnderstandingService(
-                    apiKey = ConfigManager.apiKey,
+                    apiKey = apiKey,
                     model = model,
                     timeoutMs = ConfigManager.apiTimeoutMs,
                     videoFps = ConfigManager.videoFpsForApi,

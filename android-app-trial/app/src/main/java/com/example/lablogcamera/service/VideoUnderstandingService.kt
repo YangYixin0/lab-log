@@ -42,6 +42,7 @@ class VideoUnderstandingService(
     
     companion object {
         private const val API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        private const val OPENROUTER_API_URL = "https://openrouter.ai/api/v1/responses"
         
         // 默认提示词
         const val DEFAULT_PROMPT = """请分析这段实验室视频，识别人物动作和设备操作。
@@ -105,6 +106,23 @@ class VideoUnderstandingService(
         onComplete: (UnderstandingResult) -> Unit,
         onError: (Exception) -> Unit
     ) {
+        if (model.contains("google/")) {
+            understandVideoOpenRouter(videoFile, prompt, onProgress, onComplete, onError)
+        } else {
+            understandVideoDashScope(videoFile, prompt, onProgress, onComplete, onError)
+        }
+    }
+
+    /**
+     * 调用阿里云 Qwen3-VL API 进行视频理解
+     */
+    private fun understandVideoDashScope(
+        videoFile: File,
+        prompt: String,
+        onProgress: (String) -> Unit,
+        onComplete: (UnderstandingResult) -> Unit,
+        onError: (Exception) -> Unit
+    ) {
         Thread {
             try {
                 // 读取视频文件并转为 Base64
@@ -145,6 +163,60 @@ class VideoUnderstandingService(
                 
             } catch (e: Exception) {
                 Log.e(TAG, "Video understanding failed", e)
+                onError(e)
+            }
+        }.start()
+    }
+
+    /**
+     * 调用 OpenRouter API 进行视频理解
+     */
+    private fun understandVideoOpenRouter(
+        videoFile: File,
+        prompt: String,
+        onProgress: (String) -> Unit,
+        onComplete: (UnderstandingResult) -> Unit,
+        onError: (Exception) -> Unit
+    ) {
+        Thread {
+            try {
+                // 读取视频文件并转为 Base64
+                val videoBytes = videoFile.readBytes()
+                val videoBase64 = Base64.encodeToString(videoBytes, Base64.NO_WRAP)
+                
+                Log.d(TAG, "OpenRouter Video size: ${videoBytes.size} bytes, base64 size: ${videoBase64.length}")
+                
+                // 构建请求体
+                val requestBody = buildOpenRouterRequestBody(videoBase64, prompt)
+                
+                // 发送请求
+                val request = Request.Builder()
+                    .url(OPENROUTER_API_URL)
+                    .header("Authorization", "Bearer $apiKey")
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .post(requestBody)
+                    .build()
+                
+                val response = client.newCall(request).execute()
+                
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: "Unknown error"
+                    throw IOException("OpenRouter API call failed: ${response.code}, $errorBody")
+                }
+                
+                // 处理 SSE 流式响应
+                val fullText = StringBuilder()
+                response.body?.byteStream()?.bufferedReader()?.use { reader ->
+                    processOpenRouterSSEStream(reader, onProgress, fullText)
+                }
+                
+                // 解析完整结果
+                val result = parseResult(fullText.toString(), prompt, videoFile.name)
+                onComplete(result)
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "OpenRouter Video understanding failed", e)
                 onError(e)
             }
         }.start()
@@ -197,6 +269,93 @@ class VideoUnderstandingService(
         return jsonString.toRequestBody("application/json; charset=utf-8".toMediaType())
     }
     
+    /**
+     * 构建 OpenRouter 请求体 (使用 /v1/responses)
+     */
+    private fun buildOpenRouterRequestBody(videoBase64: String, prompt: String): RequestBody {
+        val payload = mapOf(
+            "model" to model,
+            "input" to listOf(
+                mapOf(
+                    "type" to "message",
+                    "role" to "user",
+                    "content" to listOf(
+                        mapOf(
+                            "type" to "input_text",
+                            "text" to prompt
+                        ),
+                        mapOf(
+                            "type" to "input_video",
+                            "video_url" to "data:video/mp4;base64,$videoBase64"
+                        )
+                    )
+                )
+            ),
+            "temperature" to temperature,
+            "top_p" to topP,
+            "reasoning" to mapOf(
+                "enabled" to enableThinking,
+                "max_tokens" to thinkingBudget
+            ),
+            "stream" to true,
+            "provider" to mapOf(
+                "order" to listOf("Google (Vertex)", "Google")
+            )
+        )
+        
+        val jsonString = gson.toJson(payload)
+        Log.d(TAG, "OpenRouter Request body size: ${jsonString.length} bytes")
+        
+        return jsonString.toRequestBody("application/json; charset=utf-8".toMediaType())
+    }
+
+    /**
+     * 处理 OpenRouter SSE 流式响应
+     */
+    private fun processOpenRouterSSEStream(
+        reader: BufferedReader,
+        onProgress: (String) -> Unit,
+        fullText: StringBuilder
+    ) {
+        var line: String?
+        // 建立 content_index -> type 映射
+        val partTypeMap = mutableMapOf<Int, String>()
+        
+        while (reader.readLine().also { line = it } != null) {
+            val currentLine = line ?: continue
+            if (currentLine.startsWith("data:")) {
+                val jsonData = currentLine.substring(5).trim()
+                if (jsonData == "[DONE]") break
+                
+                try {
+                    val jsonObject = JsonParser.parseString(jsonData).asJsonObject
+                    val type = jsonObject.get("type")?.asString
+                    
+                    when (type) {
+                        "response.content_part.added" -> {
+                            val contentIndex = jsonObject.get("content_index")?.asInt ?: -1
+                            val partType = jsonObject.getAsJsonObject("part")?.get("type")?.asString ?: ""
+                            partTypeMap[contentIndex] = partType
+                        }
+                        "response.content_part.delta" -> {
+                            val contentIndex = jsonObject.get("content_index")?.asInt ?: -1
+                            // 只拼接类型为 output_text 的 delta
+                            if (partTypeMap[contentIndex] == "output_text") {
+                                val delta = jsonObject.get("delta")?.asString
+                                if (!delta.isNullOrEmpty()) {
+                                    fullText.append(delta)
+                                    onProgress(delta)
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse OpenRouter SSE data: $jsonData", e)
+                }
+            }
+        }
+    }
+
     /**
      * 处理 SSE 流式响应
      */

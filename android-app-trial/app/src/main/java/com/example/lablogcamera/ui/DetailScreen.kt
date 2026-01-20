@@ -230,6 +230,20 @@ fun DetailScreen(
                                     modifier = Modifier.padding(start = 4.dp)  // 减少间距：8dp -> 4dp
                                 )
                             }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                RadioButton(
+                                    selected = selectedModel == "google/gemini-2.5-flash-preview-09-2025",
+                                    onClick = { selectedModel = "google/gemini-2.5-flash-preview-09-2025" }
+                                )
+                                Text(
+                                    text = "Gemini-2.5-Flash",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(start = 4.dp)
+                                )
+                            }
                         }
                         
                         Spacer(modifier = Modifier.height(2.dp))  // 减少间距：4dp -> 2dp
