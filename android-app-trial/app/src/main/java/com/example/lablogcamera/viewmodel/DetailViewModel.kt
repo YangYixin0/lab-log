@@ -84,15 +84,6 @@ class DetailViewModel(application: Application) : AndroidViewModel(application) 
             _errorMessage.value = null
             
             try {
-                // 增加使用次数
-                if (!UsageCounter.incrementAndCheck(getApplication(), ConfigManager.maxApiCalls)) {
-                    _errorMessage.value = "已达到使用次数限制"
-                    _canUse.value = false
-                    _isUnderstanding.value = false
-                    return@launch
-                }
-                updateUsageCount()
-                
                 val videoFile = File(recording.videoPath)
                 if (!videoFile.exists()) {
                     _errorMessage.value = "视频文件不存在"
@@ -133,6 +124,10 @@ class DetailViewModel(application: Application) : AndroidViewModel(application) 
                         _streamingText.value += text
                     },
                     onComplete = { result ->
+                        // 成功后增加使用次数
+                        UsageCounter.incrementAndCheck(getApplication(), ConfigManager.maxApiCalls)
+                        updateUsageCount()
+
                         // 保存结果
                         val updatedResults = recording.results + result
                         storageManager.saveResults(recording.id, updatedResults)
@@ -146,7 +141,27 @@ class DetailViewModel(application: Application) : AndroidViewModel(application) 
                         Log.d(TAG, "Understanding completed: ${result.events.size} events, ${result.appearances.size} appearances")
                     },
                     onError = { error ->
-                        _errorMessage.value = "理解失败: ${error.message}"
+                        val currentRecording = _recording.value
+                        if (currentRecording != null && error.message?.contains("不占用限额") == true) {
+                            // 针对特定的云服务不稳定错误，记录一个带错误信息的结果
+                            val failedResult = UnderstandingResult(
+                                id = "${System.currentTimeMillis()}_failed",
+                                timestamp = System.currentTimeMillis(),
+                                prompt = prompt,
+                                events = emptyList(),
+                                appearances = emptyList(),
+                                rawResponse = error.message ?: "Unknown error",
+                                model = model,
+                                isStreaming = false,
+                                parseError = error.message
+                            )
+                            val updatedResults = currentRecording.results + failedResult
+                            storageManager.saveResults(currentRecording.id, updatedResults)
+                            loadRecording(currentRecording.id)
+                        } else {
+                            _errorMessage.value = "理解失败: ${error.message}"
+                        }
+                        
                         _isUnderstanding.value = false
                         _streamingText.value = ""
                         Log.e(TAG, "Understanding failed", error)

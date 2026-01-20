@@ -157,6 +157,10 @@ class VideoUnderstandingService(
                     processSSEStream(reader, onProgress, fullText)
                 }
                 
+                if (fullText.isEmpty()) {
+                    throw IOException("DashScope returned empty content")
+                }
+                
                 // 解析完整结果
                 val result = parseResult(fullText.toString(), prompt, videoFile.name, model)
                 onComplete(result)
@@ -179,72 +183,94 @@ class VideoUnderstandingService(
         onError: (Exception) -> Unit
     ) {
         Thread {
-            try {
-                // 读取视频文件并转为 Base64
-                val videoBytes = videoFile.readBytes()
-                val videoBase64 = Base64.encodeToString(videoBytes, Base64.NO_WRAP)
-                
-                Log.d(TAG, "OpenRouter Video size: ${videoBytes.size} bytes, base64 size: ${videoBase64.length}")
-                
-                // 构建请求体
-                val requestBody = buildOpenRouterRequestBody(videoBase64, prompt)
-                
-                // 发送请求
-                val request = Request.Builder()
-                    .url(OPENROUTER_API_URL)
-                    .header("Authorization", "Bearer $apiKey")
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "text/event-stream")
-                    .post(requestBody)
-                    .build()
-                
-                val response = client.newCall(request).execute()
-                
-                if (!response.isSuccessful) {
-                    val errorBody = response.body?.string() ?: "Unknown error"
-                    throw IOException("OpenRouter API call failed: ${response.code}, $errorBody")
-                }
-                
-                val contentType = response.header("Content-Type") ?: ""
-                Log.d(TAG, "OpenRouter response: ${response.code}, Content-Type: $contentType")
-                
-                // 处理 SSE 流式响应
-                val fullText = StringBuilder()
-                val body = response.body
-                if (body == null) {
-                    throw IOException("OpenRouter response body is null")
-                }
-                
-                if (contentType.contains("application/json")) {
-                    // 如果返回的是单个 JSON 对象而不是流，可能是错误信息
-                    val jsonStr = body.string()
-                    Log.e(TAG, "Received non-SSE JSON response: $jsonStr")
-                    try {
-                        val jsonObject = JsonParser.parseString(jsonStr).asJsonObject
-                        if (jsonObject.has("error")) {
-                            val error = jsonObject.getAsJsonObject("error")
-                            throw IOException("OpenRouter error: ${error.get("message")?.asString}")
+            var retryCount = 0
+            val maxRetries = 2
+            var lastException: Exception? = null
+            
+            while (retryCount <= maxRetries) {
+                try {
+                    if (retryCount > 0) {
+                        Log.d(TAG, "Retrying OpenRouter understanding... (Attempt ${retryCount + 1})")
+                        Thread.sleep(1000) // 重试前稍作等待
+                    }
+                    
+                    // 读取视频文件并转为 Base64
+                    val videoBytes = videoFile.readBytes()
+                    val videoBase64 = Base64.encodeToString(videoBytes, Base64.NO_WRAP)
+                    
+                    Log.d(TAG, "OpenRouter Video size: ${videoBytes.size} bytes, base64 size: ${videoBase64.length}")
+                    
+                    // 构建请求体
+                    val requestBody = buildOpenRouterRequestBody(videoBase64, prompt)
+                    
+                    // 发送请求
+                    val request = Request.Builder()
+                        .url(OPENROUTER_API_URL)
+                        .header("Authorization", "Bearer $apiKey")
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "text/event-stream")
+                        .post(requestBody)
+                        .build()
+                    
+                    val response = client.newCall(request).execute()
+                    
+                    if (!response.isSuccessful) {
+                        val errorBody = response.body?.string() ?: "Unknown error"
+                        throw IOException("OpenRouter API call failed: ${response.code}, $errorBody")
+                    }
+                    
+                    val contentType = response.header("Content-Type") ?: ""
+                    Log.d(TAG, "OpenRouter response: ${response.code}, Content-Type: $contentType")
+                    
+                    // 处理 SSE 流式响应
+                    val fullText = StringBuilder()
+                    val body = response.body ?: throw IOException("OpenRouter response body is null")
+                    
+                    if (contentType.contains("application/json")) {
+                        // 如果返回的是单个 JSON 对象而不是流，可能是错误信息
+                        val jsonStr = body.string()
+                        Log.e(TAG, "Received non-SSE JSON response: $jsonStr")
+                        try {
+                            val jsonObject = JsonParser.parseString(jsonStr).asJsonObject
+                            if (jsonObject.has("error")) {
+                                val error = jsonObject.getAsJsonObject("error")
+                                throw IOException("OpenRouter error: ${error.get("message")?.asString}")
+                            }
+                        } catch (e: Exception) {
+                            if (e is IOException) throw e
                         }
-                    } catch (e: Exception) {
-                        // 解析 JSON 失败，就按原样处理
+                        fullText.append(jsonStr)
+                    } else {
+                        body.byteStream().bufferedReader().use { reader ->
+                            processOpenRouterSSEStream(reader, onProgress, fullText)
+                        }
                     }
-                    fullText.append(jsonStr)
-                } else {
-                    body.byteStream().bufferedReader().use { reader ->
-                        processOpenRouterSSEStream(reader, onProgress, fullText)
+                    
+                    Log.d(TAG, "OpenRouter fullText length: ${fullText.length}")
+                    
+                    if (fullText.isEmpty()) {
+                        throw IOException("OpenRouter returned empty content")
                     }
+                    
+                    // 解析完整结果
+                    val result = parseResult(fullText.toString(), prompt, videoFile.name, model)
+                    onComplete(result)
+                    return@Thread // 成功，退出线程
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "OpenRouter Attempt ${retryCount + 1} failed", e)
+                    lastException = e
+                    retryCount++
                 }
-                
-                Log.d(TAG, "OpenRouter fullText length: ${fullText.length}")
-                
-                // 解析完整结果
-                val result = parseResult(fullText.toString(), prompt, videoFile.name, model)
-                onComplete(result)
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "OpenRouter Video understanding failed", e)
-                onError(e)
             }
+            
+            // 所有重试都失败了
+            val finalErrorMessage = if (lastException?.message?.contains("empty content") == true || lastException?.message?.contains("instability") == true) {
+                "该模型的云服务不稳定，请稍后再尝试。本次理解不占用限额。"
+            } else {
+                lastException?.message ?: "该模型的云服务不稳定，请稍后再尝试。本次理解不占用限额。"
+            }
+            onError(Exception(finalErrorMessage))
         }.start()
     }
     
