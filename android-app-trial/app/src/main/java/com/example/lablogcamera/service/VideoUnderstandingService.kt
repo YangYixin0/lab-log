@@ -205,10 +205,34 @@ class VideoUnderstandingService(
                     throw IOException("OpenRouter API call failed: ${response.code}, $errorBody")
                 }
                 
+                val contentType = response.header("Content-Type") ?: ""
+                Log.d(TAG, "OpenRouter response: ${response.code}, Content-Type: $contentType")
+                
                 // 处理 SSE 流式响应
                 val fullText = StringBuilder()
-                response.body?.byteStream()?.bufferedReader()?.use { reader ->
-                    processOpenRouterSSEStream(reader, onProgress, fullText)
+                val body = response.body
+                if (body == null) {
+                    throw IOException("OpenRouter response body is null")
+                }
+                
+                if (contentType.contains("application/json")) {
+                    // 如果返回的是单个 JSON 对象而不是流，可能是错误信息
+                    val jsonStr = body.string()
+                    Log.e(TAG, "Received non-SSE JSON response: $jsonStr")
+                    try {
+                        val jsonObject = JsonParser.parseString(jsonStr).asJsonObject
+                        if (jsonObject.has("error")) {
+                            val error = jsonObject.getAsJsonObject("error")
+                            throw IOException("OpenRouter error: ${error.get("message")?.asString}")
+                        }
+                    } catch (e: Exception) {
+                        // 解析 JSON 失败，就按原样处理
+                    }
+                    fullText.append(jsonStr)
+                } else {
+                    body.byteStream().bufferedReader().use { reader ->
+                        processOpenRouterSSEStream(reader, onProgress, fullText)
+                    }
                 }
                 
                 Log.d(TAG, "OpenRouter fullText length: ${fullText.length}")
@@ -323,12 +347,23 @@ class VideoUnderstandingService(
         // 建立 (output_index, content_index) -> type 映射
         val partTypeMap = mutableMapOf<String, String>()
         var deltaCount = 0
+        var totalLines = 0
         
         while (reader.readLine().also { line = it } != null) {
             val currentLine = line ?: continue
+            totalLines++
+            
+            // 调试：记录前几行，帮助定位非 data: 格式的内容
+            if (totalLines <= 5 && !currentLine.startsWith("data:")) {
+                Log.d(TAG, "OpenRouter Stream Line $totalLines: $currentLine")
+            }
+            
             if (currentLine.startsWith("data:")) {
                 val jsonData = currentLine.substring(5).trim()
-                if (jsonData == "[DONE]") break
+                if (jsonData == "[DONE]") {
+                    Log.d(TAG, "OpenRouter Stream: [DONE] received at line $totalLines")
+                    break
+                }
                 
                 try {
                     val jsonObject = JsonParser.parseString(jsonData).asJsonObject
@@ -337,7 +372,7 @@ class VideoUnderstandingService(
                     if (jsonObject.has("error")) {
                         val error = jsonObject.getAsJsonObject("error")
                         val msg = error.get("message")?.asString ?: "Unknown OpenRouter error"
-                        Log.e(TAG, "OpenRouter SSE error: $msg")
+                        Log.e(TAG, "OpenRouter SSE error message: $msg")
                         continue
                     }
                     
@@ -356,8 +391,8 @@ class VideoUnderstandingService(
                             val partType = partTypeMap[key]
                             
                             // 调试：记录前几个 delta 的完整结构
-                            if (deltaCount < 5) {
-                                Log.d(TAG, "OpenRouter Delta structure ($deltaCount): $jsonData")
+                            if (deltaCount < 3) {
+                                Log.d(TAG, "OpenRouter Delta ($deltaCount): $jsonData")
                                 deltaCount++
                             }
                             
@@ -384,7 +419,6 @@ class VideoUnderstandingService(
                                         fullText.append(finalPartText)
                                         onProgress(finalPartText)
                                     } else {
-                                        // 校验长度，如果不一致可能漏了 delta（可选）
                                         Log.d(TAG, "FullText length: ${fullText.length}, Done text length: ${finalPartText.length}")
                                     }
                                 }
@@ -392,9 +426,13 @@ class VideoUnderstandingService(
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse OpenRouter SSE data: $jsonData", e)
+                    Log.e(TAG, "Failed to parse OpenRouter SSE data at line $totalLines: $jsonData", e)
                 }
             }
+        }
+        
+        if (fullText.isEmpty() && totalLines > 0) {
+            Log.w(TAG, "Stream ended with $totalLines lines but fullText is still empty")
         }
     }
 
