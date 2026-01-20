@@ -219,6 +219,23 @@ fun RecordingScreen(
                 }
             }
             
+            // 提示文本
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "每次可录制最长1分钟的视频，然后尝试不同模型的理解效果。一共可尝试理解10次。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "推荐关注并测试的点：操作或取放物品（动作识别准确性）、多人交替或重复出现（人物识别一致性）、仪器示数。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            
             // 错误消息（放在提示词上方）
             if (errorMessage != null) {
                 Card(

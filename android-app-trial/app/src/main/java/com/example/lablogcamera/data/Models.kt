@@ -26,6 +26,7 @@ data class UnderstandingResult(
     val events: List<Event>,
     val appearances: List<Appearance>,
     val rawResponse: String,  // 原始响应
+    val model: String? = null,  // 使用的模型名
     val isStreaming: Boolean = false,  // 是否正在流式输出
     val parseError: String? = null  // 解析错误信息（如果解析失败）
 )

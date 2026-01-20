@@ -158,7 +158,7 @@ class VideoUnderstandingService(
                 }
                 
                 // 解析完整结果
-                val result = parseResult(fullText.toString(), prompt, videoFile.name)
+                val result = parseResult(fullText.toString(), prompt, videoFile.name, model)
                 onComplete(result)
                 
             } catch (e: Exception) {
@@ -214,7 +214,7 @@ class VideoUnderstandingService(
                 Log.d(TAG, "OpenRouter fullText length: ${fullText.length}")
                 
                 // 解析完整结果
-                val result = parseResult(fullText.toString(), prompt, videoFile.name)
+                val result = parseResult(fullText.toString(), prompt, videoFile.name, model)
                 onComplete(result)
                 
             } catch (e: Exception) {
@@ -450,7 +450,8 @@ class VideoUnderstandingService(
     private fun parseResult(
         rawResponse: String,
         prompt: String,
-        videoName: String
+        videoName: String,
+        modelName: String
     ): UnderstandingResult {
         val id = "${System.currentTimeMillis()}_${videoName.substringBeforeLast(".")}"
         val timestamp = System.currentTimeMillis()
@@ -511,6 +512,7 @@ class VideoUnderstandingService(
                     events = events,
                     appearances = appearances,
                     rawResponse = rawResponse,
+                    model = modelName,
                     isStreaming = false,
                     parseError = null  // 解析成功
                 )
@@ -524,6 +526,7 @@ class VideoUnderstandingService(
                     events = emptyList(),
                     appearances = emptyList(),
                     rawResponse = rawResponse,
+                    model = modelName,
                     isStreaming = false,
                     parseError = "不符合预期的JSON格式"  // 友好的错误信息
                 )
@@ -538,6 +541,7 @@ class VideoUnderstandingService(
                 events = emptyList(),
                 appearances = emptyList(),
                 rawResponse = rawResponse,
+                model = modelName,
                 isStreaming = false,
                 parseError = "响应中未找到JSON格式数据"
             )

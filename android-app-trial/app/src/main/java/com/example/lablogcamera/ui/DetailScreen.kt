@@ -408,10 +408,18 @@ fun UnderstandingResultCard(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     // JSON/表格切换按钮
-                    TextButton(onClick = { showJson = !showJson }) {
-                        Text(if (showJson) "查看表格" else "查看JSON")
+                    Button(
+                        onClick = { showJson = !showJson },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        modifier = Modifier.height(32.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    ) {
+                        Text(if (showJson) "查看表格" else "查看JSON", fontSize = 12.sp)
                     }
                     IconButton(onClick = { expanded = !expanded }) {
                         Icon(
@@ -472,6 +480,9 @@ fun UnderstandingResultCard(
                         )
                     }
                     
+                    // 所用模型
+                    ModelSection(result.model)
+                    
                     // 提示词（始终显示）
                     PromptSection(
                         prompt = result.prompt,
@@ -482,6 +493,36 @@ fun UnderstandingResultCard(
                 }
             }
         }
+    }
+}
+
+/**
+ * 模型显示部分
+ */
+@Composable
+fun ModelSection(model: String?) {
+    Column {
+        Text(
+            text = "所用模型",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        val modelDisplayName = when (model) {
+            "qwen3-vl-flash" -> "Qwen3-VL-Flash"
+            "qwen3-vl-plus" -> "Qwen3-VL-Plus"
+            "google/gemini-2.5-flash-preview-09-2025" -> "Gemini-2.5-Flash"
+            null -> "未记录"
+            else -> model
+        }
+        Text(
+            text = modelDisplayName,
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(12.dp),
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
 
@@ -504,8 +545,16 @@ fun EventTable(
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )
-            TextButton(onClick = onCopy) {
-                Text("复制CSV")
+            Button(
+                onClick = onCopy,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                modifier = Modifier.height(32.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            ) {
+                Text("复制CSV", fontSize = 12.sp)
             }
         }
         
@@ -557,8 +606,16 @@ fun AppearanceTable(
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )
-            TextButton(onClick = onCopy) {
-                Text("复制CSV")
+            Button(
+                onClick = onCopy,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                modifier = Modifier.height(32.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            ) {
+                Text("复制CSV", fontSize = 12.sp)
             }
         }
         
@@ -607,8 +664,16 @@ fun PromptSection(
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )
-            TextButton(onClick = onCopy) {
-                Text("复制")
+            Button(
+                onClick = onCopy,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                modifier = Modifier.height(32.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            ) {
+                Text("复制", fontSize = 12.sp)
             }
         }
         
@@ -681,8 +746,16 @@ fun JsonSection(
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )
-            TextButton(onClick = onCopy) {
-                Text("复制")
+            Button(
+                onClick = onCopy,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                modifier = Modifier.height(32.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            ) {
+                Text("复制", fontSize = 12.sp)
             }
         }
         
