@@ -36,8 +36,8 @@ video_bitrate_mbps=1.0
 video_fps=4
 video_max_duration_seconds=60
 
-# 编码格式（优先H.265，不支持回退H.264）
-video_codec_priority=h265,h264
+# 编码格式（优先H.264）
+video_codec_priority=h264,h265
 
 # 使用次数限制
 max_api_calls=10
