@@ -416,8 +416,8 @@ fun UnderstandingResultCard(
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                         modifier = Modifier.height(32.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onTertiaryContainer
                         )
                     ) {
                         Text(if (showJson) "查看表格" else "查看JSON", fontSize = 12.sp)
