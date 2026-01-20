@@ -320,8 +320,9 @@ class VideoUnderstandingService(
         fullText: StringBuilder
     ) {
         var line: String?
-        // 建立 content_index -> type 映射
-        val partTypeMap = mutableMapOf<Int, String>()
+        // 建立 (output_index, content_index) -> type 映射
+        val partTypeMap = mutableMapOf<String, String>()
+        var deltaCount = 0
         
         while (reader.readLine().also { line = it } != null) {
             val currentLine = line ?: continue
@@ -341,31 +342,52 @@ class VideoUnderstandingService(
                     }
                     
                     val type = jsonObject.get("type")?.asString
-                    
-                    // 调试日志：打印关键事件
-                    if (type != null && type.startsWith("response.content_part")) {
-                        Log.d(TAG, "OpenRouter SSE event: $type, data: $jsonData")
-                    }
+                    val outputIndex = jsonObject.get("output_index")?.asInt ?: -1
+                    val contentIndex = jsonObject.get("content_index")?.asInt ?: -1
+                    val key = "${outputIndex}_${contentIndex}"
                     
                     when (type) {
                         "response.content_part.added" -> {
-                            val contentIndex = jsonObject.get("content_index")?.asInt ?: -1
                             val partType = jsonObject.getAsJsonObject("part")?.get("type")?.asString ?: ""
-                            partTypeMap[contentIndex] = partType
+                            partTypeMap[key] = partType
+                            Log.d(TAG, "OpenRouter Part Added: $key -> $partType")
                         }
                         "response.content_part.delta" -> {
-                            val contentIndex = jsonObject.get("content_index")?.asInt ?: -1
-                            val partType = partTypeMap[contentIndex]
+                            val partType = partTypeMap[key]
                             
-                            // 允许逻辑：如果已知是 output_text，或者尚未记录类型（容错），则尝试拼接
-                            if (partType == "output_text" || partType == null) {
+                            // 调试：记录前几个 delta 的完整结构
+                            if (deltaCount < 5) {
+                                Log.d(TAG, "OpenRouter Delta structure ($deltaCount): $jsonData")
+                                deltaCount++
+                            }
+                            
+                            if (partType == "output_text") {
                                 val delta = jsonObject.get("delta")?.asString
                                 if (!delta.isNullOrEmpty()) {
                                     fullText.append(delta)
                                     onProgress(delta)
                                 }
-                            } else {
-                                Log.d(TAG, "Skipping delta for part index $contentIndex with type $partType")
+                            }
+                        }
+                        "response.content_part.done" -> {
+                            val partType = partTypeMap[key]
+                            Log.d(TAG, "OpenRouter Part Done: $key ($partType)")
+                            
+                            if (partType == "output_text") {
+                                val partObj = jsonObject.getAsJsonObject("part")
+                                val finalPartText = partObj?.get("text")?.asString
+                                
+                                if (!finalPartText.isNullOrEmpty()) {
+                                    // 兜底逻辑：如果 fullText 目前为空，说明 delta 没接合成功，直接用 done 里的完整文本
+                                    if (fullText.isEmpty()) {
+                                        Log.d(TAG, "Using fallback text from 'done' event")
+                                        fullText.append(finalPartText)
+                                        onProgress(finalPartText)
+                                    } else {
+                                        // 校验长度，如果不一致可能漏了 delta（可选）
+                                        Log.d(TAG, "FullText length: ${fullText.length}, Done text length: ${finalPartText.length}")
+                                    }
+                                }
                             }
                         }
                     }
