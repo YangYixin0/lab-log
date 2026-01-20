@@ -211,6 +211,8 @@ class VideoUnderstandingService(
                     processOpenRouterSSEStream(reader, onProgress, fullText)
                 }
                 
+                Log.d(TAG, "OpenRouter fullText length: ${fullText.length}")
+                
                 // 解析完整结果
                 val result = parseResult(fullText.toString(), prompt, videoFile.name)
                 onComplete(result)
@@ -329,7 +331,21 @@ class VideoUnderstandingService(
                 
                 try {
                     val jsonObject = JsonParser.parseString(jsonData).asJsonObject
+                    
+                    // 检查是否包含错误信息
+                    if (jsonObject.has("error")) {
+                        val error = jsonObject.getAsJsonObject("error")
+                        val msg = error.get("message")?.asString ?: "Unknown OpenRouter error"
+                        Log.e(TAG, "OpenRouter SSE error: $msg")
+                        continue
+                    }
+                    
                     val type = jsonObject.get("type")?.asString
+                    
+                    // 调试日志：打印关键事件
+                    if (type != null && type.startsWith("response.content_part")) {
+                        Log.d(TAG, "OpenRouter SSE event: $type, data: $jsonData")
+                    }
                     
                     when (type) {
                         "response.content_part.added" -> {
@@ -339,13 +355,17 @@ class VideoUnderstandingService(
                         }
                         "response.content_part.delta" -> {
                             val contentIndex = jsonObject.get("content_index")?.asInt ?: -1
-                            // 只拼接类型为 output_text 的 delta
-                            if (partTypeMap[contentIndex] == "output_text") {
+                            val partType = partTypeMap[contentIndex]
+                            
+                            // 允许逻辑：如果已知是 output_text，或者尚未记录类型（容错），则尝试拼接
+                            if (partType == "output_text" || partType == null) {
                                 val delta = jsonObject.get("delta")?.asString
                                 if (!delta.isNullOrEmpty()) {
                                     fullText.append(delta)
                                     onProgress(delta)
                                 }
+                            } else {
+                                Log.d(TAG, "Skipping delta for part index $contentIndex with type $partType")
                             }
                         }
                     }
@@ -413,8 +433,16 @@ class VideoUnderstandingService(
         val id = "${System.currentTimeMillis()}_${videoName.substringBeforeLast(".")}"
         val timestamp = System.currentTimeMillis()
         
-        // 尝试提取 JSON 部分
-        val jsonMatch = Regex("""\{[\s\S]*"events"[\s\S]*"appearances"[\s\S]*\}""").find(rawResponse)
+        Log.d(TAG, "Parsing result for $videoName, raw response length: ${rawResponse.length}")
+        if (rawResponse.isEmpty()) {
+            Log.w(TAG, "Raw response is empty!")
+        } else if (rawResponse.length < 1000) {
+            Log.d(TAG, "Raw response content: $rawResponse")
+        }
+        
+        // 尝试更宽松地提取 JSON 部分
+        // 1. 查找第一个 { 和最后一个 } 之间的内容，且包含 events
+        val jsonMatch = Regex("""\{[\s\S]*"events"[\s\S]*\}""").find(rawResponse)
         
         return if (jsonMatch != null) {
             val jsonStr = jsonMatch.value
