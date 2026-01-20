@@ -707,7 +707,7 @@ fun StreamingResultCard(streamingText: String) {
             ) {
                 CircularProgressIndicator(modifier = Modifier.size(24.dp))
                 Text(
-                    text = "正在理解...",
+                    text = "正在理解...（用时1分钟以内）",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
