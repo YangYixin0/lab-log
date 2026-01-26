@@ -7,6 +7,7 @@ import Register from './components/Register'
 import UserDashboard from './components/UserDashboard'
 import AdminDashboard from './components/AdminDashboard'
 import VectorSearch from './components/VectorSearch'
+import Emergencies from './components/Emergencies'
 import Navbar from './components/Navbar'
 
 function PrivateRoute({ children, requireAdmin = false }) {
@@ -63,6 +64,17 @@ function App() {
                 <>
                   <Navbar />
                   <VectorSearch />
+                </>
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/emergencies"
+            element={
+              <PrivateRoute requireAdmin>
+                <>
+                  <Navbar />
+                  <Emergencies />
                 </>
               </PrivateRoute>
             }

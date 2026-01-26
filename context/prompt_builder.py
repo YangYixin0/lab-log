@@ -52,7 +52,7 @@ class PromptBuilder:
         next_event_id = max_event_id + 1
         next_person_id = (max_person_id or 0) + 1
         
-        prompt = f"""请分析这段实验室视频，结合已有的上下文信息，输出续写的事件日志和人物外貌记录更新。
+        prompt = f"""请分析这段实验室视频，结合已有的上下文信息，输出续写的事件日志、人物外貌记录更新以及紧急情况识别。
 
 ## 时间戳
 - 视频中的时间戳水印格式为 "yyyy-MM-dd Time: hh:mm:ss"
@@ -69,7 +69,12 @@ class PromptBuilder:
 
 ## 任务要求
 
-### 1. 事件识别
+### 1. 紧急情况识别（最高优先级）
+- **核心识别对象**：识别画面中是否出现“火焰”（Flames）。
+- **判定标准**：如果画面中出现明火，必须记录为紧急情况。
+- **输出要求**：如果发现紧急情况，在返回的 JSON 中填写 `emergency_events` 字段。如果没发现，则该字段为空数组。
+
+### 2. 事件识别
 - 识别视频中人物进入或离开画面（是否携带物品）、人物操作设备或化学品、设备状态变化，raw_text 字段可以很详细。
 - 根据视频画面左上角的时间戳水印确定时间
 - **event_type 只能是 "person" 或 "equipment-only" 或 "none"**，不能使用其他值。
@@ -91,7 +96,7 @@ class PromptBuilder:
 - 关于 none 事件
   - 如果画面中既没有人物活动，也没有设备显示数值或者看不清示数，那么返回 none 事件（person_ids 为空数组，equipment 为空字符串）。
 
-### 2. 人物识别与外貌匹配
+### 3. 人物识别与外貌匹配
 - **优先重用已有外貌记录**：当前画面中的人物如与已有外貌描述匹配（尤其是稀有特征匹配），应使用已有的 person_id
 - 外貌描述要从头到脚详细描述，常见特点和稀有特点都要描述。看不清的特征不要描述。
 - **稀有特征**（如特殊发色、独特配饰、鲜艳衣服颜色、衣服上的显眼图案、特殊体型等）的区分价值更高
@@ -100,19 +105,19 @@ class PromptBuilder:
 - 实验室人物频繁穿上或脱下手套，因此区分人物时不要借助手套特征来考虑。
 - 发现全新人物时，追加新记录
 
-### 3. 二维码用户关联
+### 4. 二维码用户关联
 - 当二维码识别结果中的时间戳与视频画面时间接近时，观察该时刻画面中展示二维码的人物
 - 如果该人物的外貌与已有外貌记录匹配，则更新该外貌记录，补充 user_id
 - 如果该人物的外貌与已有外貌记录不匹配，则追加新记录，带有 user_id
 
-### 4. 外貌记录操作
+### 5. 外貌记录操作
 - **add**: 基于当前视频画面发现新人物，那么追加记录（新编号必须 > 现存最大）
 - **update**: 基于当前视频画面更新已记录的人物的外貌特征或 user_id
 - **merge**: 基于当前视频画面发现两个记录是同一人，那么将小编号合并到大编号
   - 合并时，将小编号的所有特征融合到大编号的描述中
   - merge_from 必须小于 target_person_id
 
-### 5. 编号分配规则
+### 6. 编号分配规则
 - **新事件编号必须从 evt_{next_event_id:05d} 开始递增**
 - start_time 在先的事件先描述。如果两个事件的 start_time 相同，则随意。
 - **新人物编号必须从 p{next_person_id} 开始递增**
@@ -130,65 +135,33 @@ class PromptBuilder:
       "event_type": "person",
       "person_ids": ["p3"],
       "description": "人物 p3 向本摄像头展示二维码。"
-    }},
-    {{
-      "event_id": "evt_xxxxx",
-      "start_time": "2025-12-24T10:00:00",
-      "end_time": "2025-12-24T10:00:35",
-      "event_type": "person",
-      "person_ids": ["p6", "p7"],
-      "equipment": "离心机",
-      "description": "人物 p6 抬起离心机上盖，人物 p7 蹲下将试管放入离心机中。"
-    }},
-    {{
-      "event_id": "evt_xxxxx",
-      "start_time": "2025-12-24T10:00:00",
-      "end_time": "2025-12-24T10:00:55",
-      "event_type": "equipment-only",
-      "person_ids": [],
-      "equipment": "恒温箱",
-      "description": "恒温箱显示屏显示温度为 37.5°C，温度保持稳定，未有人物操作。"
-    }},
-    {{
-      "event_id": "evt_xxxxx",
-      "start_time": "2025-12-24T10:00:00",
-      "end_time": "2025-12-24T10:00:55",
-      "event_type": "none",
-      "person_ids": [],
-      "equipment": "",
-      "description": "画面中无人物活动，无设备显示数值变化。"
     }}
   ],
   "appearance_updates": [
     {{
       "op": "add",
       "target_person_id": "p7",
-      "appearance": "短黑发，戴黑框眼镜，穿白色实验服，内搭蓝色格子衬衫，黑色休闲裤，白色运动鞋，左手腕戴银色手表。",
+      "appearance": "短黑发，戴黑框眼镜，穿白色实验服...",
       "user_id": null
-    }},
+    }}
+  ],
+  "emergency_events": [
     {{
-      "op": "update",
-      "target_person_id": "p3",
-      "appearance": "长黑发扎马尾，戴透明护目镜，穿白色实验服，内搭粉色T恤，蓝色牛仔裤，白色平底鞋，右手无名指戴银色戒指。",
-      "user_id": "350a9666b94f4e40"
-    }},
-    {{
-      "op": "merge",
-      "target_person_id": "p6",
-      "merge_from": "p2",
-      "appearance": "短棕发，未佩戴眼镜，穿白色实验服，内搭灰色毛衣（有独特的红色条纹），深蓝色西裤，棕色皮鞋，左耳有小耳钉。"
+      "description": "画面左侧离心机位置出现明火，伴随黑烟。",
+      "start_time": "2025-12-24T10:00:05",
+      "end_time": "2025-12-24T10:00:15"
     }}
   ]
 }}
 ```
 
 ## 注意事项
+- **必须优先检查并记录紧急情况（如火焰）。**
 - **同一个人的连续操作涉及相同的一个或多个设备时，应当合并为一个事件。为此，raw_text 字段内容可以长一些。**
 - 事件描述中不要包含具体的人物外貌特征和 user_id，这些信息只保存在外貌表中
 - equipment-only 和 none 事件的 person_ids 应为空数组 []
-- 如果视频中没有人物，但是有设备显示数值，那么描述并返回 equipment-only 事件
-- 如果视频中既没有人物活动，也没有设备显示数值，那么返回 none 事件（person_ids 为空数组，equipment 为空字符串）
 - 如果没有外貌更新，appearance_updates 返回空数组
+- 如果没有紧急情况，emergency_events 返回空数组
 """
         return prompt
     

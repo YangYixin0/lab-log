@@ -90,3 +90,15 @@ CREATE TABLE IF NOT EXISTS person_appearances (
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ==================== 紧急情况表 ====================
+CREATE TABLE IF NOT EXISTS emergencies (
+    emergency_id VARCHAR(64) PRIMARY KEY,
+    description TEXT NOT NULL COMMENT '紧急情况描述',
+    status ENUM('PENDING', 'RESOLVED') DEFAULT 'PENDING' COMMENT '处理状态',
+    start_time DATETIME NOT NULL COMMENT '发生时间',
+    end_time DATETIME NOT NULL COMMENT '结束时间',
+    segment_id VARCHAR(64) COMMENT '视频分段 ID',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TIMESTAMP NULL,
+    INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

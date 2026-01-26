@@ -13,6 +13,7 @@
 - **结构化日志**：将视频内容转换为带时间戳的结构化事件日志（事件不加密，直接写入数据库）
 - **字段级加密**：支持对敏感字段（如人物外观特征）进行加密，使用混合加密方案（AES-GCM + RSA-OAEP）。日终处理时，系统会自动根据识别出的用户身份使用对应的公钥进行加密，确保隐私数据仅该用户可解。
 - **向量检索**：支持日志的向量嵌入和语义搜索，便于后续的智能查询和分析。日终处理会自动触发索引构建。
+- **紧急事件提醒**：视觉模型自动识别实验室紧急情况（如火焰），系统实时记录并向管理员发送 Web 弹窗/变红提醒。
 - **Web 前端**：提供用户友好的 Web 界面，支持用户注册、登录、查看数据和管理功能
 - **权限管理**：支持用户角色（admin/user），admin 用户可以查看数据库和进行向量搜索
 
@@ -102,7 +103,7 @@
      - 启动时自动加载已存在的外貌缓存文件（`logs_debug/appearances_today.json`）
      - 模型输出续写事件和外貌更新，事件立即入库（不加密），外貌更新写入缓存
      - 每处理 N 个分段，自动保存外貌缓存到 `logs_debug/appearances_today.json`
-   - 处理管线：动态上下文构建 → Qwen3-VL Flash → 解析双输出 → 事件写入 logs_raw（不加密）→ 外貌更新缓存 → 生成缩略图 → 单行 Realtime 日志输出。
+   - 处理管线：动态上下文构建 → 视觉模型 → 解析多输出（事件、外貌、紧急情况）→ 数据写入数据库（logs_raw, emergencies）→ 外貌更新缓存 → 生成缩略图 → 单行 Realtime 日志输出。
 
 2) **离线处理（已有 MP4 文件）**
    - 使用 `scripts/process_video.py /path/to/video.mp4` 直接跑 VideoLogPipeline。
@@ -602,10 +603,16 @@ python scripts/index_events.py --limit 2000 --batch-size 200
 #### 8.2 Admin 功能（仅管理员可见）
 
 - **查看数据库**：
-  - 查看所有数据库表（users、logs_raw、logs_embedding、field_encryption_keys、tickets）
+  - 查看所有数据库表（users、logs_raw、logs_embedding、field_encryption_keys、tickets、emergencies、person_appearances）
   - 支持分页浏览表数据
   - 自动刷新（每 10 秒）
   - 智能列宽：vector 类型较窄，text/json 类型较宽，ID 类型完整显示
+
+- **紧急通知管理**：
+  - 系统自动轮询未处理的紧急情况（如火焰识别）
+  - 发现紧急情况时，导航栏背景变为红色，并显示待处理数量
+  - 提供专属管理页面，展示紧急情况详情（描述、时间、分段ID）
+  - 支持“标记为已解决”操作，处理后系统恢复正常状态
 
 - **向量搜索**：
   - 输入查询文本进行语义搜索
@@ -685,8 +692,9 @@ python scripts/clear_test_data.py
 - **动态提示词构建**：基于当天事件缓存（从 JSONL 文件读取最新 n 条）、人物外貌表缓存（从文件加载全量）和二维码识别结果构建提示词
 - **模型选择**：支持通过环境变量选择使用 Qwen3-VL Flash 或 Plus 模型
 - **模型输出**：模型输出两部分结构化数据
-  - `events_to_append`：续写的事件列表（event_id, start_time, end_time, event_type, person_ids, equipment, description）
-  - `appearance_updates`：外貌更新操作（add/update/merge）
+    - `events_to_append`：续写的事件列表（event_id, start_time, end_time, event_type, person_ids, equipment, description）
+    - `appearance_updates`：外貌更新操作（add/update/merge）
+    - `emergency_events`：识别出的紧急情况（description, start_time, end_time）
 - **事件类型**：支持三种事件类型
   - `person`：人物事件，包含人物动作和设备操作
   - `equipment-only`：设备事件，仅设备状态变化，无人物参与（person_ids 为空数组）
@@ -745,20 +753,22 @@ lab-log/
 │   ├── dependencies.py      # 依赖注入
 │   ├── auth.py              # 认证逻辑（bcrypt、session）
 │   ├── routers/             # API 路由
-│   │   ├── auth.py          # 认证路由（注册、登录）
-│   │   ├── users.py         # 用户路由（用户信息、二维码）
-│   │   └── admin.py         # Admin 路由（数据库查看、向量搜索）
-│   └── models/              # Pydantic 数据模型
-├── web_ui/              # React 前端
-│   ├── src/
-│   │   ├── components/      # React 组件
-│   │   │   ├── Login.jsx           # 登录页面
-│   │   │   ├── Register.jsx       # 注册页面
-│   │   │   ├── UserDashboard.jsx  # 用户中心
-│   │   │   ├── AdminDashboard.jsx # 数据库查看
-│   │   │   ├── VectorSearch.jsx   # 向量搜索
-│   │   │   ├── QRCode.jsx         # 二维码展示
-│   │   │   └── Navbar.jsx         # 导航栏
+│       │   ├── auth.py          # 认证路由（注册、登录）
+    │   │   ├── users.py         # 用户路由（用户信息、二维码）
+    │   │   ├── admin.py         # Admin 路由（数据库查看、向量搜索）
+    │   │   └── emergencies.py   # 紧急情况路由（报警查询、状态处理）
+    │   └── models/              # Pydantic 数据模型
+    ├── web_ui/              # React 前端
+    │   ├── src/
+    │   │   ├── components/      # React 组件
+    │   │   │   ├── Login.jsx           # 登录页面
+    │   │   │   ├── Register.jsx       # 注册页面
+    │   │   │   ├── UserDashboard.jsx  # 用户中心
+    │   │   │   ├── AdminDashboard.jsx # 数据库查看
+    │   │   │   ├── VectorSearch.jsx   # 向量搜索
+    │   │   │   ├── Emergencies.jsx    # 紧急通知管理
+    │   │   │   ├── QRCode.jsx         # 二维码展示
+    │   │   │   └── Navbar.jsx         # 导航栏
 │   │   ├── hooks/          # React Hooks
 │   │   │   └── useAuth.js  # 认证状态管理
 │   │   └── api/            # API 客户端
@@ -834,6 +844,9 @@ SELECT event_id, segment_id, start_time, end_time, raw_text
 FROM logs_raw 
 ORDER BY start_time DESC 
 LIMIT 20;
+
+-- 查看待处理的紧急情况
+SELECT * FROM emergencies WHERE status = 'PENDING';
 
 -- 查看结构化数据（JSON 格式）
 -- 注意：字段名已从 encrypted_structured 改为 structured

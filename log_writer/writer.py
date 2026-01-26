@@ -1,6 +1,7 @@
 """日志写入器（写入数据库和 JSONL 文件）"""
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -61,6 +62,26 @@ class LogWriter:
         
         # 写入 JSONL 文件（用于调试）
         self._write_debug_log(event_log, structured)
+
+    def write_emergency_log(self, emergency: Any) -> None:
+        """写入紧急情况日志"""
+        self.db.insert_emergency_log(emergency)
+        self._write_emergency_debug_log(emergency)
+
+    def _write_emergency_debug_log(self, emergency: Any) -> None:
+        """写入紧急情况调试日志"""
+        log_file = self.debug_log_dir / "emergencies.jsonl"
+        log_entry = {
+            "emergency_id": emergency.emergency_id,
+            "description": emergency.description,
+            "status": emergency.status,
+            "start_time": emergency.start_time.isoformat(),
+            "end_time": emergency.end_time.isoformat(),
+            "segment_id": emergency.segment_id,
+            "created_at": datetime.now().isoformat()
+        }
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
     
     def _encrypt_fields(self, event_log: EventLog, structured: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -193,6 +214,26 @@ class SimpleLogWriter:
         
         # 写入 JSONL 文件（用于调试）
         self._write_debug_log(event_log)
+
+    def write_emergency_log(self, emergency: Any) -> None:
+        """写入紧急情况日志"""
+        self.db.insert_emergency_log(emergency)
+        self._write_emergency_debug_log(emergency)
+
+    def _write_emergency_debug_log(self, emergency: Any) -> None:
+        """写入紧急情况调试日志"""
+        log_file = self.debug_log_dir / "emergencies.jsonl"
+        log_entry = {
+            "emergency_id": emergency.emergency_id,
+            "description": emergency.description,
+            "status": emergency.status,
+            "start_time": emergency.start_time.isoformat(),
+            "end_time": emergency.end_time.isoformat(),
+            "segment_id": emergency.segment_id,
+            "created_at": datetime.now().isoformat()
+        }
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
     
     def _write_debug_log(self, event_log: EventLog) -> None:
         """写入调试日志文件（JSONL 格式）"""

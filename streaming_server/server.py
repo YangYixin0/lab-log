@@ -356,6 +356,12 @@ async def process_segment_queue_dynamic(session: RecordingSession):
                 if session.log_writer:
                     for event in events:
                         session.log_writer.write_event_log(event)
+                    
+                    # 写入紧急情况
+                    if hasattr(result, 'emergencies') and result.emergencies:
+                        for emg in result.emergencies:
+                            session.log_writer.write_emergency_log(emg)
+                        print(f"[Realtime] 检测到 {len(result.emergencies)} 个紧急情况！")
                 
                 # 提取缩略图（从MP4的第一帧）
                 segment_mp4_path = Path(segment_info['segment_path'])

@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from dashscope import MultiModalConversation
 
 from video_processing.interface import VideoProcessor
-from storage.models import VideoSegment, VideoUnderstandingResult, EventLog
+from storage.models import VideoSegment, VideoUnderstandingResult, EventLog, Emergency
 from context.appearance_cache import AppearanceCache
 from context.event_context import EventContext
 from context.prompt_builder import PromptBuilder
@@ -34,9 +34,10 @@ class AppearanceUpdate:
 
 @dataclass
 class ProcessingResult:
-    """处理结果（包含事件和外貌更新）"""
+    """处理结果（包含事件、外貌更新和紧急情况）"""
     events: List[EventLog]
     appearance_updates: List[AppearanceUpdate]
+    emergencies: List[Emergency] = field(default_factory=list)
     raw_response: str
 
 
@@ -368,11 +369,12 @@ class Qwen3VLFlashProcessor(VideoProcessor):
         """
         events = []
         appearance_updates = []
+        emergencies = []
         
         # 提取 JSON
         json_str = self._extract_json(response_text)
         if not json_str:
-            return ProcessingResult(events=[], appearance_updates=[], raw_response=response_text)
+            return ProcessingResult(events=[], appearance_updates=[], emergencies=[], raw_response=response_text)
         
         try:
             data = json.loads(json_str)
@@ -398,6 +400,17 @@ class Qwen3VLFlashProcessor(VideoProcessor):
                 except Exception as e:
                     print(f"警告：解析外貌更新失败: {e}")
                     continue
+
+            # 解析紧急情况
+            emergencies_data = data.get('emergency_events', [])
+            for emg_data in emergencies_data:
+                try:
+                    emg = self._parse_emergency(emg_data, segment)
+                    if emg:
+                        emergencies.append(emg)
+                except Exception as e:
+                    print(f"警告：解析紧急情况失败: {e}")
+                    continue
             
         except json.JSONDecodeError as e:
             print(f"警告：无法解析 JSON 响应: {e}")
@@ -406,8 +419,46 @@ class Qwen3VLFlashProcessor(VideoProcessor):
         return ProcessingResult(
             events=events,
             appearance_updates=appearance_updates,
+            emergencies=emergencies,
             raw_response=response_text
         )
+
+    def _parse_emergency(self, emg_data: Dict[str, Any], segment: VideoSegment) -> Optional[Emergency]:
+        """解析单个紧急情况"""
+        try:
+            description = emg_data.get('description', '')
+            if not description:
+                return None
+                
+            # 解析时间
+            start_time_str = emg_data.get('start_time', '')
+            end_time_str = emg_data.get('end_time', '')
+            
+            try:
+                start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                # 如果解析失败，回退到分段起止时间
+                from datetime import timedelta
+                base_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                start_time = base_date + timedelta(seconds=segment.start_time)
+                end_time = base_date + timedelta(seconds=segment.end_time)
+            
+            # 生成临时 ID (存入数据库时可能会重新分配或使用此 ID)
+            import uuid
+            emergency_id = f"emg_{uuid.uuid4().hex[:8]}"
+            
+            return Emergency(
+                emergency_id=emergency_id,
+                description=description,
+                start_time=start_time,
+                end_time=end_time,
+                segment_id=segment.segment_id,
+                status="PENDING"
+            )
+        except Exception as e:
+            print(f"解析紧急情况异常: {e}")
+            return None
     
     def _extract_json(self, text: str) -> Optional[str]:
         """从文本中提取 JSON"""

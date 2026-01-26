@@ -76,6 +76,95 @@ class SeekDBClient:
         except Exception as e:
             self.connection.rollback()
             raise RuntimeError(f"插入事件日志失败: {e}")
+
+    def insert_emergency_log(self, emergency: Any) -> None:
+        """插入紧急情况日志"""
+        self._ensure_connected()
+        
+        sql = """
+            INSERT INTO emergencies (emergency_id, description, status, start_time, end_time, segment_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                description = VALUES(description),
+                status = VALUES(status),
+                start_time = VALUES(start_time),
+                end_time = VALUES(end_time),
+                segment_id = VALUES(segment_id)
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    sql,
+                    (
+                        emergency.emergency_id,
+                        emergency.description,
+                        emergency.status,
+                        emergency.start_time,
+                        emergency.end_time,
+                        emergency.segment_id
+                    )
+                )
+            self.connection.commit()
+        except Exception as e:
+            self.connection.rollback()
+            raise RuntimeError(f"插入紧急情况日志失败: {e}")
+
+    def get_pending_emergency_count(self) -> int:
+        """获取待处理的紧急情况数量"""
+        self._ensure_connected()
+        
+        sql = "SELECT COUNT(*) as count FROM emergencies WHERE status = 'PENDING'"
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql)
+                result = cursor.fetchone()
+                return result['count'] if result else 0
+        except Exception as e:
+            raise RuntimeError(f"获取待处理紧急情况数量失败: {e}")
+
+    def get_emergencies(self, status: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        """获取紧急情况列表"""
+        self._ensure_connected()
+        
+        sql = "SELECT * FROM emergencies"
+        params = []
+        
+        if status:
+            sql += " WHERE status = %s"
+            params.append(status)
+        
+        sql += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, params)
+                results = cursor.fetchall()
+                return list(results)
+        except Exception as e:
+            raise RuntimeError(f"获取紧急情况列表失败: {e}")
+
+    def resolve_emergency(self, emergency_id: str) -> bool:
+        """解决紧急情况"""
+        self._ensure_connected()
+        
+        sql = """
+            UPDATE emergencies 
+            SET status = 'RESOLVED', resolved_at = CURRENT_TIMESTAMP 
+            WHERE emergency_id = %s
+        """
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql, (emergency_id,))
+                affected = cursor.rowcount
+            self.connection.commit()
+            return affected > 0
+        except Exception as e:
+            self.connection.rollback()
+            raise RuntimeError(f"解决紧急情况失败: {e}")
     
     def get_user_public_key(self, user_id: str) -> str:
         """获取用户公钥（PEM 格式）"""
@@ -464,7 +553,7 @@ class SeekDBClient:
         self._ensure_connected()
         
         # 验证表名（防止 SQL 注入）
-        allowed_tables = ['users', 'logs_raw', 'logs_embedding', 'tickets', 'field_encryption_keys', 'person_appearances']
+        allowed_tables = ['users', 'logs_raw', 'logs_embedding', 'tickets', 'field_encryption_keys', 'person_appearances', 'emergencies']
         if table_name not in allowed_tables:
             raise ValueError(f"不允许访问表: {table_name}")
         

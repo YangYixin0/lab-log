@@ -63,3 +63,16 @@ class LogChunk:
     end_time: datetime
     embedding: Optional[List[float]] = None  # 1024 维向量
 
+
+@dataclass
+class Emergency:
+    """紧急情况"""
+    emergency_id: str
+    description: str
+    start_time: datetime
+    end_time: datetime
+    segment_id: str
+    status: str = "PENDING"  # PENDING, RESOLVED
+    created_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+
