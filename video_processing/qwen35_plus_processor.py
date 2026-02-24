@@ -1,4 +1,4 @@
-"""Qwen3-VL Flash 视频理解处理器（动态上下文版本）"""
+"""Qwen3.5 Plus 视频理解处理器（动态上下文版本）"""
 
 import os
 import json
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from dashscope import MultiModalConversation
 
 from video_processing.interface import VideoProcessor
-from storage.models import VideoSegment, VideoUnderstandingResult, EventLog, Emergency
+from storage.models import VideoSegment, VideoUnderstandingResult, EventLog
 from context.appearance_cache import AppearanceCache
 from context.event_context import EventContext
 from context.prompt_builder import PromptBuilder
@@ -34,15 +34,14 @@ class AppearanceUpdate:
 
 @dataclass
 class ProcessingResult:
-    """处理结果（包含事件、外貌更新和紧急情况）"""
+    """处理结果（包含事件和外貌更新）"""
     events: List[EventLog]
     appearance_updates: List[AppearanceUpdate]
     raw_response: str
-    emergencies: List[Emergency] = field(default_factory=list)
 
 
-class Qwen3VLFlashProcessor(VideoProcessor):
-    """Qwen3-VL Flash 视频理解处理器（动态上下文版本）"""
+class Qwen35PlusProcessor(VideoProcessor):
+    """Qwen3.5 Plus 视频理解处理器（动态上下文版本）"""
     
     def __init__(
         self,
@@ -60,8 +59,8 @@ class Qwen3VLFlashProcessor(VideoProcessor):
         
         Args:
             api_key: DashScope API Key，如果为 None 则从环境变量读取
-            model: 模型名称，如果为 None 则从环境变量 VIDEO_UNDERSTANDING_MODEL 读取，默认 "qwen3-vl-flash"
-            fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧，如果为 None 则从环境变量 VIDEO_FPS 读取，默认 2.0
+            model: 模型名称，如果为 None 则从环境变量 VIDEO_UNDERSTANDING_MODEL 读取，默认 "qwen3.5-plus"
+            fps: 视频抽帧率，表示每隔 1/fps 秒抽取一帧，如果为 None 则从环境变量 VIDEO_FPS 读取，默认 1.0
             enable_thinking: 是否启用思考，如果为 None 则从环境变量 ENABLE_THINKING 读取，默认 True
             thinking_budget: 思考预算，如果为 None 则从环境变量 THINKING_BUDGET 读取，默认 8192 tokens
             appearance_cache: 人物外貌缓存，如果为 None 则创建默认实例
@@ -73,7 +72,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
             raise ValueError("未提供 DASHSCOPE_API_KEY，请在环境变量或参数中设置")
         
         # 从环境变量读取模型配置，如果没有则使用默认值
-        self.model = model or os.getenv('VIDEO_UNDERSTANDING_MODEL', 'qwen3-vl-flash')
+        self.model = model or os.getenv('VIDEO_UNDERSTANDING_MODEL', 'qwen3.5-plus')
         
         # 从环境变量读取思考配置
         if enable_thinking is None:
@@ -102,7 +101,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
             self.fps = fps
         
         # 从环境变量读取模型调用参数
-        vl_high_res_str = os.getenv('VL_HIGH_RESOLUTION_IMAGES', 'false')
+        vl_high_res_str = os.getenv('VL_HIGH_RESOLUTION_IMAGES', 'true')
         self.vl_high_resolution_images = vl_high_res_str.lower() in ('true', '1', 'yes', 'on')
         
         temp_str = os.getenv('VL_TEMPERATURE', '0.1')
@@ -184,25 +183,17 @@ class Qwen3VLFlashProcessor(VideoProcessor):
             })
         
         try:
-            # 构建 API 调用参数
-            api_params = {
-                'api_key': self.api_key,
-                'model': self.model,
-                'messages': messages,
-                'stream': False,
-                'enable_thinking': self.enable_thinking,
-                'thinking_budget': self.thinking_budget
-            }
-            
-            # 根据配置添加可选参数
-            if self.vl_high_resolution_images:
-                api_params['vl_high_resolution_images'] = True
-            if self.temperature is not None:
-                api_params['temperature'] = self.temperature
-            if self.top_p is not None:
-                api_params['top_p'] = self.top_p
-            
-            response = MultiModalConversation.call(**api_params)
+            response = MultiModalConversation.call(
+                api_key=self.api_key,
+                model=self.model,
+                messages=messages,
+                stream=False,
+                vl_high_resolution_images=self.vl_high_resolution_images,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                enable_thinking=self.enable_thinking,
+                thinking_budget=self.thinking_budget
+            )
             
             # 解析响应
             message = response["output"]["choices"][0]["message"]
@@ -233,7 +224,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
                     events=events
                 )
         except Exception as e:
-            raise RuntimeError(f"视频理解 API 调用失败: {e}")
+            raise RuntimeError(f"视频理解 API 调用失败：{e}")
     
     def process_segment_with_context(
         self,
@@ -291,25 +282,17 @@ class Qwen3VLFlashProcessor(VideoProcessor):
         ]
         
         try:
-            # 构建 API 调用参数
-            api_params = {
-                'api_key': self.api_key,
-                'model': self.model,
-                'messages': messages,
-                'stream': False,
-                'enable_thinking': self.enable_thinking,
-                'thinking_budget': self.thinking_budget
-            }
-            
-            # 根据配置添加可选参数
-            if self.vl_high_resolution_images:
-                api_params['vl_high_resolution_images'] = True
-            if self.temperature is not None:
-                api_params['temperature'] = self.temperature
-            if self.top_p is not None:
-                api_params['top_p'] = self.top_p
-            
-            response = MultiModalConversation.call(**api_params)
+            response = MultiModalConversation.call(
+                api_key=self.api_key,
+                model=self.model,
+                messages=messages,
+                stream=False,
+                vl_high_resolution_images=self.vl_high_resolution_images,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                enable_thinking=self.enable_thinking,
+                thinking_budget=self.thinking_budget
+            )
             
             message = response["output"]["choices"][0]["message"]
             result_text = message.content[0]["text"]
@@ -321,7 +304,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
             return self._parse_dynamic_response(result_text, segment)
             
         except Exception as e:
-            raise RuntimeError(f"视频理解 API 调用失败: {e}")
+            raise RuntimeError(f"视频理解 API 调用失败：{e}")
     
     def _build_dynamic_prompt(self, segment: VideoSegment) -> str:
         """使用动态上下文构建提示词"""
@@ -369,12 +352,11 @@ class Qwen3VLFlashProcessor(VideoProcessor):
         """
         events = []
         appearance_updates = []
-        emergencies = []
         
         # 提取 JSON
         json_str = self._extract_json(response_text)
         if not json_str:
-            return ProcessingResult(events=[], appearance_updates=[], emergencies=[], raw_response=response_text)
+            return ProcessingResult(events=[], appearance_updates=[], raw_response=response_text)
         
         try:
             data = json.loads(json_str)
@@ -387,7 +369,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
                     if event:
                         events.append(event)
                 except Exception as e:
-                    print(f"警告：解析事件失败: {e}")
+                    print(f"警告：解析事件失败：{e}")
                     continue
             
             # 解析外貌更新
@@ -398,67 +380,18 @@ class Qwen3VLFlashProcessor(VideoProcessor):
                     if update:
                         appearance_updates.append(update)
                 except Exception as e:
-                    print(f"警告：解析外貌更新失败: {e}")
-                    continue
-
-            # 解析紧急情况
-            emergencies_data = data.get('emergency_events', [])
-            for emg_data in emergencies_data:
-                try:
-                    emg = self._parse_emergency(emg_data, segment)
-                    if emg:
-                        emergencies.append(emg)
-                except Exception as e:
-                    print(f"警告：解析紧急情况失败: {e}")
+                    print(f"警告：解析外貌更新失败：{e}")
                     continue
             
         except json.JSONDecodeError as e:
-            print(f"警告：无法解析 JSON 响应: {e}")
-            print(f"响应文本: {response_text[:500]}")
+            print(f"警告：无法解析 JSON 响应：{e}")
+            print(f"响应文本：{response_text[:500]}")
         
         return ProcessingResult(
             events=events,
             appearance_updates=appearance_updates,
-            emergencies=emergencies,
             raw_response=response_text
         )
-
-    def _parse_emergency(self, emg_data: Dict[str, Any], segment: VideoSegment) -> Optional[Emergency]:
-        """解析单个紧急情况"""
-        try:
-            description = emg_data.get('description', '')
-            if not description:
-                return None
-                
-            # 解析时间
-            start_time_str = emg_data.get('start_time', '')
-            end_time_str = emg_data.get('end_time', '')
-            
-            try:
-                start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-            except (ValueError, AttributeError):
-                # 如果解析失败，回退到分段起止时间
-                from datetime import timedelta
-                base_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                start_time = base_date + timedelta(seconds=segment.start_time)
-                end_time = base_date + timedelta(seconds=segment.end_time)
-            
-            # 生成临时 ID (存入数据库时可能会重新分配或使用此 ID)
-            import uuid
-            emergency_id = f"emg_{uuid.uuid4().hex[:8]}"
-            
-            return Emergency(
-                emergency_id=emergency_id,
-                description=description,
-                start_time=start_time,
-                end_time=end_time,
-                segment_id=segment.segment_id,
-                status="PENDING"
-            )
-        except Exception as e:
-            print(f"解析紧急情况异常: {e}")
-            return None
     
     def _extract_json(self, text: str) -> Optional[str]:
         """从文本中提取 JSON"""
@@ -529,7 +462,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
                 raw_text=event_data.get('description', '')
             )
         except Exception as e:
-            print(f"解析事件异常: {e}")
+            print(f"解析事件异常：{e}")
             return None
     
     def _parse_appearance_update(self, update_data: Dict[str, Any]) -> Optional[AppearanceUpdate]:
@@ -589,7 +522,7 @@ class Qwen3VLFlashProcessor(VideoProcessor):
 1. 识别视频中的人物动作（使用了什么设备或工具或化学品）、设备运转状态，和相应的时间范围，记录为事件。
 2. 关于时间
     - 根据视频画面左上角的时间戳水印 "yyyy-MM-dd Time: HH:MM:SS" 来判断时间。
-    - 如果时间戳水印缺少日期，则使用2025-12-22作为日期。
+    - 如果时间戳水印缺少日期，则使用 2025-12-22 作为日期。
 3. 关于事件划分
     - 如果有多个人同时出现，将每个人的动作分开记录为事件。
     - 一个设备，如果有显示数值且似乎与人物动作无关，要单独记录为一个事件。
@@ -689,10 +622,10 @@ class Qwen3VLFlashProcessor(VideoProcessor):
                     )
                     events.append(event_log)
                 except Exception as e:
-                    print(f"警告：无法解析事件: {e}")
+                    print(f"警告：无法解析事件：{e}")
                     continue
         except json.JSONDecodeError as e:
-            print(f"警告：无法解析 JSON 响应: {e}")
-            print(f"响应文本: {response_text[:500]}")
+            print(f"警告：无法解析 JSON 响应：{e}")
+            print(f"响应文本：{response_text[:500]}")
         
         return events

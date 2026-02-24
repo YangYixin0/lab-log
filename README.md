@@ -7,7 +7,7 @@
 ### 核心特性
 
 - **动态上下文视频理解**：使用动态上下文驱动的视频理解，基于当天事件缓存、人物外貌表缓存和二维码识别结果构建提示词，模型输出续写事件和外貌更新
-- **视频理解**：使用 Qwen3-VL Flash 视觉大模型分析实验室视频，自动识别人物动作、设备操作等信息
+- **视频理解**：支持 Qwen3-VL 、 Qwen3.5 、 Gemini2.5 系列视觉大模型，分析实验室视频，自动识别人物动作、设备操作等信息
 - **人物外貌管理**：自动维护人物外貌表缓存，支持追加、更新、合并操作，使用并查集管理编号合并关系
 - **二维码识别**：Android 采集端实时识别用户二维码，自动关联用户身份与视频片段
 - **结构化日志**：将视频内容转换为带时间戳的结构化事件日志（事件不加密，直接写入数据库）
@@ -24,7 +24,7 @@
 - **视频接入**：支持 MP4 视频文件处理（未来可扩展为流式处理）
 - **视频分段**：使用关键帧对齐将长视频分割为处理段（约 60 秒），支持迭代式分段确保连续性
 - **动态上下文**：维护当天事件缓存（最新 n 条）和人物外貌表缓存（全量），用于构建模型提示词
-- **视频理解**：调用 Qwen3-VL Flash API 进行视频内容分析，使用动态上下文生成续写事件和外貌更新
+- **视频理解**：调用 Qwen 或 Gemini API 进行视频内容分析，使用动态上下文生成续写事件和外貌更新
 - **人物外貌管理**：使用并查集管理人物编号合并关系，支持追加、更新、合并操作
 - **日志写入**：将识别的事件直接写入数据库（不加密），人物外貌表缓存在内存/文件，日终再加密入库
 - **向量嵌入**：对日志进行分块和向量化，支持语义搜索
@@ -49,7 +49,7 @@
     ├─ 加载人物外貌表缓存（从内存/文件 logs_debug/appearances_today.json）
     └─ 获取二维码识别结果（从分段元数据）
     ↓
-[视频理解] 调用 Qwen3-VL Flash，输入动态上下文，输出：
+[视频理解] 调用 Qwen3-VL / Qwen3.5 API（Flash/Plus），输入动态上下文，输出：
     ├─ events_to_append: 续写的事件列表
     └─ appearance_updates: 外貌更新（add/update/merge）
     ↓
@@ -71,7 +71,7 @@
     ↓
 [视频分段] 关键帧对齐，分为多个约 60 秒的片段（迭代式分段确保连续性）
     ↓
-[视频理解] 对每个片段调用 Qwen3-VL Flash，提取事件
+[视频理解] 对每个片段调用 Qwen3-VL / Qwen3.5 API（Flash/Plus），提取事件
     ↓
 [日志生成] 将识别的事件转换为结构化 EventLog
     ↓
@@ -125,7 +125,7 @@
    - 确保分段连续且无重叠，每个分段不超过 5 分钟
 2. **视频理解**（动态上下文模式）：
    - 构建动态提示词：包含视频片段、二维码识别结果、当天最新 n 条事件（从 JSONL 文件读取）、人物外貌表全量（从缓存文件加载）
-   - 调用 Qwen3-VL API 分析视频内容（可通过环境变量选择 Flash 或 Plus 模型）
+   - 调用 Qwen3-VL / Qwen3.5 API 分析视频内容（可通过环境变量选择 Flash 或 Plus 模型）
    - 模型输出两部分：
      - `events_to_append`：续写的事件列表（event_id, start_time, end_time, event_type, person_ids, equipment, description）
      - `appearance_updates`：外貌更新操作（add/update/merge）
@@ -303,7 +303,7 @@ DEFAULT_BITRATE_MB=1.0               # 默认码率（MB，默认1.0）
 DEFAULT_FPS=4                       # 默认帧率（默认4）
 
 # 视频理解模型配置（可选）
-VIDEO_UNDERSTANDING_MODEL=qwen3-vl-flash  # 视频理解模型：qwen3-vl-flash / qwen3-vl-plus / google/gemini-2.5-flash-preview-09-2025（默认 qwen3-vl-flash）
+VIDEO_UNDERSTANDING_MODEL=qwen3-vl-flash  # 视频理解模型：qwen3-vl-flash / qwen3-vl-plus / qwen3.5-flash / qwen3.5-plus / google/gemini-2.5-flash-preview-09-2025（默认 qwen3-vl-flash）
 VIDEO_FPS=2.0  # 视频抽帧率，表示每隔 1/fps 秒抽取一帧（默认 2.0）
 ENABLE_THINKING=true  # 是否启用思考（默认true）
 THINKING_BUDGET=8192  # 思考预算（tokens，默认8192，qwen3-vl最大81920）
@@ -690,7 +690,7 @@ python scripts/clear_test_data.py
 
 ### 动态上下文视频理解
 - **动态提示词构建**：基于当天事件缓存（从 JSONL 文件读取最新 n 条）、人物外貌表缓存（从文件加载全量）和二维码识别结果构建提示词
-- **模型选择**：支持通过环境变量选择使用 Qwen3-VL Flash 或 Plus 模型
+- **模型选择**：支持通过环境变量选择使用 Qwen 或 Gemini 系列
 - **模型输出**：模型输出两部分结构化数据
     - `events_to_append`：续写的事件列表（event_id, start_time, end_time, event_type, person_ids, equipment, description）
     - `appearance_updates`：外貌更新操作（add/update/merge）
@@ -710,7 +710,7 @@ python scripts/clear_test_data.py
 - **事件上下文来源**：从 `logs_debug/event_logs.jsonl` 文件读取，无需数据库连接，支持离线工作
 
 ### 视频理解（传统模式）
-- 使用 Qwen3-VL Flash 进行视频理解
+- 使用 Qwen 或 Gemini 系列进行视频理解
 - 自动提取人物动作、设备操作等信息
 - 从视频画面提取时间戳
 
@@ -781,9 +781,11 @@ lab-log/
 ├── storage/             # 数据库存储
 ├── segmentation/        # 视频分段
 ├── video_processing/    # 视频理解
-│   ├── qwen3_vl_processor.py        # 处理器工厂（根据环境变量选择 Flash/Plus）
+│   ├── qwen3_vl_processor.py        # 处理器工厂（根据环境变量选择模型）
 │   ├── qwen3_vl_flash_processor.py  # Qwen3-VL Flash 处理器
-│   └── qwen3_vl_plus_processor.py   # Qwen3-VL Plus 处理器
+│   ├── qwen3_vl_plus_processor.py   # Qwen3-VL Plus 处理器
+│   ├── qwen35_flash_processor.py    # Qwen3.5 Flash 处理器
+│   └── qwen35_plus_processor.py     # Qwen3.5 Plus 处理器
 ├── log_writer/          # 日志写入与加密
 ├── indexing/            # 分块与嵌入
 │   ├── chunker.py              # 分块器（策略模式）
@@ -952,6 +954,7 @@ python streaming_server/test_qr_server.py
 - **FastAPI**：现代、快速的 Web 框架，用于构建 API
 - **SeekDB**：AI 原生混合搜索数据库（支持向量、全文、JSON）
 - **Qwen3-VL Flash / Plus**：视频理解模型（DashScope API）
+- **Qwen3.5 Flash / Plus**：视频理解模型（DashScope API）
 - **Gemini 2.5 Flash**：视频理解模型（OpenRouter API）
 - **Qwen text-embedding-v4**：文本向量嵌入模型（1024 维）
 - **ffmpeg/ffprobe**：视频处理和分段
@@ -988,7 +991,7 @@ python streaming_server/test_qr_server.py
    - 私钥丢失后无法恢复，需要重新注册
 
 2. **API Key**：
-   - 使用 `qwen3-vl-flash / qwen3-vl-plus`：确保 `DASHSCOPE_API_KEY` 有效且有足够的配额
+   - 使用 `qwen3-vl-flash / qwen3-vl-plus / qwen3.5-flash / qwen3.5-plus`：确保 `DASHSCOPE_API_KEY` 有效且有足够的配额
    - 使用 `google/gemini-2.5-flash-preview-09-2025`：确保 `OPENROUTER_API_KEY` 有效且有足够的配额
    - google/gemini-2.5-flash-preview-09-2025 的识别效果好像比 google/gemini-2.5-flash 要好一点
 

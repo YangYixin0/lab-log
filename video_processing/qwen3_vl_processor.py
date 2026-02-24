@@ -14,6 +14,8 @@ load_dotenv()
 # 延迟导入，避免循环依赖
 from video_processing.qwen3_vl_flash_processor import Qwen3VLFlashProcessor
 from video_processing.qwen3_vl_plus_processor import Qwen3VLPlusProcessor
+from video_processing.qwen35_flash_processor import Qwen35FlashProcessor
+from video_processing.qwen35_plus_processor import Qwen35PlusProcessor
 from video_processing.openrouter_processor import OpenRouterProcessor
 
 
@@ -67,7 +69,32 @@ def create_qwen_processor(
             event_context=event_context,
             max_recent_events=max_recent_events
         )
+    elif 'qwen3.5' in model.lower() and 'plus' in model.lower():
+        # qwen3.5-plus
+        return Qwen35PlusProcessor(
+            api_key=api_key,
+            model=model,
+            fps=fps,
+            enable_thinking=enable_thinking,
+            thinking_budget=thinking_budget,
+            appearance_cache=appearance_cache,
+            event_context=event_context,
+            max_recent_events=max_recent_events
+        )
+    elif 'qwen3.5' in model.lower() and 'flash' in model.lower():
+        # qwen3.5-flash
+        return Qwen35FlashProcessor(
+            api_key=api_key,
+            model=model,
+            fps=fps,
+            enable_thinking=enable_thinking,
+            thinking_budget=thinking_budget,
+            appearance_cache=appearance_cache,
+            event_context=event_context,
+            max_recent_events=max_recent_events
+        )
     elif 'plus' in model.lower() or model == 'qwen3-vl-plus':
+        # qwen3-vl-plus
         return Qwen3VLPlusProcessor(
             api_key=api_key,
             model=model,
@@ -79,7 +106,7 @@ def create_qwen_processor(
             max_recent_events=max_recent_events
         )
     else:
-        # 默认使用 Flash
+        # 默认使用 qwen3-vl-flash
         return Qwen3VLFlashProcessor(
             api_key=api_key,
             model=model,
@@ -96,10 +123,14 @@ def create_qwen_processor(
 # 使用环境变量 VIDEO_UNDERSTANDING_MODEL 来决定使用哪个处理器
 class Qwen3VLProcessor:
     """
-    Qwen3-VL 视频理解处理器（兼容类）
+    Qwen 系列视频理解处理器（兼容类）
     
-    根据环境变量 VIDEO_UNDERSTANDING_MODEL 自动选择使用 Flash 或 Plus 处理器
-    默认使用 Flash 处理器
+    根据环境变量 VIDEO_UNDERSTANDING_MODEL 自动选择处理器：
+    - qwen3-vl-flash / qwen3-vl-plus：Qwen3-VL 系列
+    - qwen3.5-flash / qwen3.5-plus：Qwen3.5 系列
+    - google/gemini-*：Gemini 系列（通过 OpenRouter）
+    
+    默认使用 qwen3-vl-flash 处理器
     """
     
     def __new__(
